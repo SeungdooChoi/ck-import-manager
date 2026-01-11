@@ -497,12 +497,13 @@ with tab_detail:
         
         with sub_t2:
             st.subheader("엑셀 파일 업로드")
-            st.caption("※ '수입' 탭 양식의 엑셀 파일을 업로드하세요. '품명'이 시스템에 등록되어 있어야 합니다.")
-            up_file = st.file_uploader("파일 선택", type=['xlsx', 'csv'])
+            st.caption("※ '수입' 탭 양식의 CSV 파일을 업로드하세요. '품명'이 시스템에 등록되어 있어야 합니다.")
+            up_file = st.file_uploader("파일 선택", type=['csv'])
             if up_file:
                 if st.button("분석 및 등록 시작", use_container_width=True):
                     try:
-                        df_up = pd.read_csv(up_file) if up_file.name.endswith('.csv') else pd.read_excel(up_file)
+                        # CSV 파일 읽기
+                        df_up = pd.read_csv(up_file)
                         valid_rows, err_list = parse_import_full_excel(df_up)
                         
                         if err_list:
