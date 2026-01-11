@@ -214,35 +214,38 @@ def safe_date_parse(val):
     try:
         if isinstance(val, datetime): return val.date()
         s_val = str(val).strip()
-        # 엑셀의 숫자형 날짜 (예: 45300) 등은 pandas가 이미 변환했을 수 있음
-        # 문자열 패턴 처리
-        if re.match(r'^\d{2}/\d{2}/\d{2}$', s_val): # 25/01/01
+        
+        # 엑셀 날짜 형식 다양하게 처리
+        # 25/01/01
+        if re.match(r'^\d{2}/\d{2}/\d{2}$', s_val): 
             dt = datetime.strptime(s_val, "%y/%m/%d")
-            # 2000년대 보정
             if dt.year < 2000: dt = dt.replace(year=dt.year+2000)
             return dt.date()
-        if re.match(r'^\d{4}-\d{2}-\d{2}$', s_val): # 2025-01-01
+        # 2025-01-01
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', s_val):
             return datetime.strptime(s_val, "%Y-%m-%d").date()
-        if re.match(r'^\d{4}\.\d{2}\.\d{2}$', s_val): # 2025.01.01
+        # 2025.01.01
+        if re.match(r'^\d{4}\.\d{2}\.\d{2}$', s_val): 
             return datetime.strptime(s_val, "%Y.%m.%d").date()
-        
-        # pandas to_datetime 시도
+        # 20250101
+        if re.match(r'^\d{8}$', s_val): 
+            return datetime.strptime(s_val, "%Y%m%d").date()
+            
         return pd.to_datetime(val).date()
     except:
         return None
 
 def safe_float_parse(val):
-    """문자열/숫자를 float으로 변환 (쉼표 제거)"""
+    """문자열/숫자를 float으로 변환 (쉼표, 공백 제거)"""
     if pd.isna(val) or str(val).strip() == '': return 0.0
     try:
-        s_val = str(val).replace(',', '').strip()
+        s_val = str(val).replace(',', '').replace(' ', '').strip()
         return float(s_val)
     except: return 0.0
 
 def parse_import_full_excel(df):
     """
-    '수입' 탭(상세 장부) 구조의 엑셀 파일 파싱
-    헤더를 찾아 컬럼 매핑 후 데이터 추출
+    '수입장부-테스트중.csv' 형식 파싱
     """
     valid_data = []
     errors = []
@@ -255,92 +258,102 @@ def parse_import_full_excel(df):
     # 공백 제거/소문자 변환 매핑
     product_map = {row['품목명'].replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
-    # 헤더 찾기 (CK, 품명 등이 있는 행)
-    # 기존: '글로벌'까지 찾았으나, CSV 구조상 누락될 수 있어 완화
+    # 1. 헤더 행 찾기 로직 강화
     header_row_idx = -1
     for i, row in df.iterrows():
-        row_str = row.astype(str).str.cat()
-        # 'CK' 와 '품명'이 포함된 행을 찾음
+        # 행의 모든 값을 하나의 문자열로 합쳐서 키워드 검색
+        row_str = " ".join([str(x).strip() for x in row.values])
         if 'CK' in row_str and '품명' in row_str:
             header_row_idx = i
             break
             
     if header_row_idx == -1:
-        # 두 번째 시도: '관리번호'가 있는 행 찾기 (제공된 CSV 예시 기준)
-        for i, row in df.iterrows():
-            row_str = row.astype(str).str.cat()
-            if '관리번호' in row_str and '품명' in row_str:
-                header_row_idx = i
-                break
-                
-    if header_row_idx == -1:
-        return [], ["헤더('CK' 또는 '관리번호', '품명')를 찾을 수 없습니다. '수입' 탭 양식인지 확인하세요."]
+        return [], ["헤더('CK', '품명')를 찾을 수 없습니다. 올바른 CSV 파일인지 확인하세요."]
 
-    # 헤더 설정 (헤더 행 다음부터 데이터)
+    # 2. 헤더 설정 및 데이터 슬라이싱
     df.columns = df.iloc[header_row_idx]
+    # 컬럼 이름의 공백/줄바꿈 정리 (중요!)
+    df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
+    
     data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
+    cols = list(data_df.columns)
     
-    cols = data_df.columns.astype(str)
-    
-    # 컬럼 인덱스 찾기 (이름 기반)
+    # 3. 컬럼 인덱스 매핑 (유사어 처리)
     def find_col(keywords):
         for c in cols:
-            if any(k in c for k in keywords): return c
+            # 대소문자 무시 비교
+            c_str = str(c).upper()
+            for k in keywords:
+                if k.upper() in c_str: return c
         return None
 
-    # 컬럼 매핑 (제공된 CSV 파일 구조 반영)
+    # 제공된 CSV의 실제 컬럼명 기반 매핑
     col_map = {
-        'ck': find_col(['CK', '관리번호']), # 관리번호 컬럼도 CK로 인식
+        'ck': find_col(['CK', '관리번호']),
         'global': find_col(['글로벌']),
         'doojin': find_col(['두진']),
         'agency': find_col(['대행']),
-        'agency_contract': find_col(['대행계약서', '대행\n계약서']),
+        'agency_contract': find_col(['대행 계약서', '대행계약서']),
         'supplier': find_col(['수출자', '수입자']),
         'origin': find_col(['원산지']),
         'name': find_col(['품명']),
         'size': find_col(['사이즈']),
         'packing': find_col(['Packing']),
-        'open_qty': find_col(['오픈', '오픈 수량', '오픈 \n수량']),
-        'unit': find_col(['단위']), # 첫번째 단위
-        'doc_qty': find_col(['서류', '서류\n수량']),
-        'box_qty': find_col(['박스', '박스\n수량']),
-        'price': find_col(['단가', '단가\n(USD)']),
-        'unit2': cols[list(cols).index(find_col(['단가', '단가\n(USD)']))+1] if find_col(['단가', '단가\n(USD)']) else None, # 단가 옆 컬럼
+        'open_qty': find_col(['오픈 수량']),
+        'unit': find_col(['단위']), 
+        'doc_qty': find_col(['서류 수량']),
+        'box_qty': find_col(['박스 수량']),
+        'price': find_col(['단가']), # '단가(USD)'
+        # 단위2는 단가 바로 뒤 컬럼이라고 가정
         'open_amt': find_col(['오픈 금액', '오픈금액']),
-        'doc_amt': find_col(['서류 금액', '서류\n금액']),
+        'doc_amt': find_col(['서류 금액', '서류금액']),
         'tt': find_col(['T/T']),
         'bank': find_col(['은행']),
         'usance': find_col(['Usance']),
-        'at_sight': find_col(['At', 'At\nSight']),
+        'at_sight': find_col(['At Sight']),
         'open_date': find_col(['개설일']),
-        'lc_no': find_col(['L/C No', 'L/C No.']),
-        'inv_no': find_col(['Invoice', 'Invoice No.']),
-        'bl_no': find_col(['B/L', 'B/L No.']),
+        'lc_no': find_col(['L/C No']),
+        'inv_no': find_col(['Invoice']),
+        'bl_no': find_col(['B/L']),
         'lg_no': find_col(['L/G']),
         'insurance': find_col(['보험']),
-        'broker_date': find_col(['관세사', '관세사 발송일']),
+        'broker_date': find_col(['관세사']), # '관세사 발송일'
         'etd': find_col(['ETD']),
         'eta': find_col(['ETA']),
         'arrival_date': find_col(['입고일']),
         'wh': find_col(['창고']),
-        'real_in_qty': find_col(['실입고', '실입고\n수량']),
+        'real_in_qty': find_col(['실입고']),
         'dest': find_col(['착지']),
         'note': find_col(['비고']),
         'doc_acc': find_col(['서류인수']),
-        'acc_rate': find_col(['인수', '인수\n수수료율']),
+        'acc_rate': find_col(['인수 수수료율']),
         'mat_date': find_col(['만기일']),
-        'ext_date': find_col(['연장', '연장 \n만기일']),
+        'ext_date': find_col(['연장 만기일']),
         'acc_fee': find_col(['인수 수수료']),
-        'dis_fee': find_col(['인수할인료', '인수 할인료']),
+        'dis_fee': find_col(['인수 할인료']),
         'pay_date': find_col(['결제일']),
-        'pay_amt': find_col(['결제금액']),
+        'pay_amt': find_col(['결제금액', '결제 금액']),
         'ex_rate': find_col(['환율']),
         'balance': find_col(['잔액']),
         'avg_ex': find_col(['평균환율'])
     }
+    
+    # unit2 (단위2) 컬럼 위치 찾기 (단가 컬럼 오른쪽)
+    try:
+        price_col_name = col_map['price']
+        if price_col_name:
+            idx = cols.index(price_col_name)
+            if idx + 1 < len(cols):
+                col_map['unit2'] = cols[idx+1]
+            else:
+                col_map['unit2'] = None
+        else:
+            col_map['unit2'] = None
+    except:
+        col_map['unit2'] = None
 
+    # 4. 데이터 파싱 루프
     for idx, row in data_df.iterrows():
-        # 품명 없으면 스킵
         name_val = str(row.get(col_map['name'], '')).strip()
         if not name_val or name_val.lower() == 'nan': continue
         
@@ -352,11 +365,11 @@ def parse_import_full_excel(df):
         if ck_val.lower() == 'nan': ck_val = ""
         
         if not pid:
+            # 품목이 없으면 에러로 처리 (자동 등록 안 함)
             errors.append(f"[행 {idx+header_row_idx+2}] 알 수 없는 품목: '{name_val}' (CK: {ck_val})")
             continue
             
         try:
-            # 데이터 추출 및 변환
             data = {
                 'product_id': pid,
                 'ck_code': ck_val,
@@ -369,8 +382,7 @@ def parse_import_full_excel(df):
                 'size': str(row.get(col_map['size'], '')).strip(),
                 'packing': str(row.get(col_map['packing'], '')).strip(),
                 'open_qty': safe_float_parse(row.get(col_map['open_qty'])),
-                # quantity는 open_qty를 기본값으로 사용
-                'quantity': safe_float_parse(row.get(col_map['open_qty'])),
+                'quantity': safe_float_parse(row.get(col_map['open_qty'])), # open_qty를 기본 수량으로
                 'doc_qty': safe_float_parse(row.get(col_map['doc_qty'])),
                 'box_qty': safe_float_parse(row.get(col_map['box_qty'])),
                 'unit2': str(row.get(col_map['unit2'], '')).strip(),
@@ -389,7 +401,7 @@ def parse_import_full_excel(df):
                 'insurance': str(row.get(col_map['insurance'], '')).strip(),
                 'customs_broker_date': safe_date_parse(row.get(col_map['broker_date'])),
                 'etd': safe_date_parse(row.get(col_map['etd'])),
-                'expected_date': safe_date_parse(row.get(col_map['eta'])) or get_kst_today(), # ETA 없으면 오늘
+                'expected_date': safe_date_parse(row.get(col_map['eta'])) or get_kst_today(),
                 'arrival_date': safe_date_parse(row.get(col_map['arrival_date'])),
                 'warehouse': str(row.get(col_map['wh'], '')).strip(),
                 'actual_in_qty': safe_float_parse(row.get(col_map['real_in_qty'])),
@@ -409,9 +421,10 @@ def parse_import_full_excel(df):
                 'status': 'PENDING'
             }
             
-            # Nan 문자열 처리
+            # Nan 문자열 처리 ('nan' 문자열이 DB에 들어가지 않도록)
             for k, v in data.items():
-                if isinstance(v, str) and v.lower() == 'nan': data[k] = ''
+                if isinstance(v, str) and (v.lower() == 'nan' or v.lower() == 'nat'): 
+                    data[k] = ''
             
             valid_data.append(data)
             
