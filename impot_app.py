@@ -203,7 +203,10 @@ def safe_float_parse(val):
     except: return 0.0
 
 def parse_import_full_excel(df):
-    """'수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱"""
+    """
+    '수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱
+    헤더를 찾아 컬럼 매핑 후 데이터 추출
+    """
     valid_data = []
     errors = []
     
@@ -211,55 +214,102 @@ def parse_import_full_excel(df):
     if p_df.empty: return [], ["시스템에 등록된 품목이 없습니다."]
     product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
-    # 헤더 찾기
+    # 1. 헤더 행 찾기 (스코어링 방식)
+    # 상위 20행을 검사하여 'CK', '품명', '수량', '단가' 등의 키워드가 가장 많이 포함된 행을 헤더로 간주
+    keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
+    max_score = 0
     header_row_idx = -1
-    for i, row in df.iterrows():
-        row_str = " ".join([str(x).strip() for x in row.values if pd.notna(x)])
-        if 'CK' in row_str and '품명' in row_str:
-            header_row_idx = i; break
-            
-    if header_row_idx == -1:
-        for i, row in df.iterrows():
-            row_str = " ".join([str(x).strip() for x in row.values if pd.notna(x)])
-            if '관리번호' in row_str and '품명' in row_str:
-                header_row_idx = i; break
-                
-    if header_row_idx == -1: return [], ["헤더('CK' 또는 '관리번호', '품명')를 찾을 수 없습니다."]
+    
+    # 데이터프레임이 비어있으면 리턴
+    if df.empty: return [], ["파일 내용이 없습니다."]
 
+    for i in range(min(20, len(df))):
+        row_vals = [str(x).strip() for x in df.iloc[i].values if pd.notna(x)]
+        row_str = " ".join(row_vals)
+        score = 0
+        for k in keywords:
+            if k in row_str: score += 1
+        
+        if score > max_score and score >= 2: # 최소 2개 이상 키워드 일치
+            max_score = score
+            header_row_idx = i
+            
+    if header_row_idx == -1: return [], ["헤더('CK', '품명' 등)를 찾을 수 없습니다."]
+
+    # 2. 헤더 설정
     df.columns = df.iloc[header_row_idx]
-    df.columns = [str(c).replace('\n', ' ').replace('\r', '').strip() for c in df.columns]
+    # 컬럼 이름 정제 (줄바꿈, 공백 제거)
+    df.columns = [str(c).replace('\n', '').replace('\r', '').replace(' ', '').strip() for c in df.columns]
+    
     data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
     cols = list(data_df.columns)
     
+    # 3. 컬럼 매핑 (공백 제거된 컬럼명 기준)
     def find_col(keywords):
         for c in cols:
-            c_clean = str(c).upper().replace(" ", "")
+            c_clean = str(c).upper().strip()
             for k in keywords:
-                if k.upper().replace(" ", "") in c_clean: return c
+                # 키워드도 공백 제거 후 비교
+                k_clean = k.upper().replace(" ", "").replace("\n", "")
+                if k_clean in c_clean: return c
         return None
 
     col_map = {
-        'ck': find_col(['CK', '관리번호']), 'global': find_col(['글로벌']), 'doojin': find_col(['두진']),
-        'agency': find_col(['대행']), 'agency_contract': find_col(['대행계약서', '대행 계약서']),
-        'supplier': find_col(['수출자', '수입자']), 'origin': find_col(['원산지']), 'name': find_col(['품명']),
-        'size': find_col(['사이즈']), 'packing': find_col(['Packing']), 'open_qty': find_col(['오픈수량', '오픈 수량']),
-        'unit': find_col(['단위']), 'doc_qty': find_col(['서류수량', '서류 수량']), 'box_qty': find_col(['박스수량', '박스 수량']),
-        'price': find_col(['단가']), 'open_amt': find_col(['오픈금액', '오픈 금액']), 'doc_amt': find_col(['서류금액', '서류 금액']),
-        'tt': find_col(['T/T']), 'bank': find_col(['은행']), 'usance': find_col(['Usance']), 'at_sight': find_col(['AtSight', 'At Sight']),
-        'open_date': find_col(['개설일']), 'lc_no': find_col(['LCNo', 'L/C']), 'inv_no': find_col(['Invoice']),
-        'bl_no': find_col(['BLNo', 'B/L']), 'lg_no': find_col(['LG', 'L/G']), 'insurance': find_col(['보험']),
-        'broker_date': find_col(['관세사', '관세사발송일']), 'etd': find_col(['ETD']), 'eta': find_col(['ETA']),
-        'arrival_date': find_col(['입고일']), 'wh': find_col(['창고']), 'real_in_qty': find_col(['실입고', '실입고수량']),
-        'dest': find_col(['착지']), 'note': find_col(['비고']), 'doc_acc': find_col(['서류인수']),
-        'acc_rate': find_col(['인수수수료율', '인수 수수료율']), 'mat_date': find_col(['만기일']), 'ext_date': find_col(['연장만기일', '연장 만기일']),
-        'acc_fee': find_col(['인수수수료', '인수 수수료']), 'dis_fee': find_col(['인수할인료', '인수 할인료']), 'pay_date': find_col(['결제일']),
-        'pay_amt': find_col(['결제금액', '결제 금액']), 'ex_rate': find_col(['환율']), 'balance': find_col(['잔액']), 'avg_ex': find_col(['평균환율'])
+        'ck': find_col(['CK', '관리번호']), 
+        'global': find_col(['글로벌']), 
+        'doojin': find_col(['두진']),
+        'agency': find_col(['대행']), 
+        'agency_contract': find_col(['대행계약서']),
+        'supplier': find_col(['수출자', '수입자']), 
+        'origin': find_col(['원산지']), 
+        'name': find_col(['품명']),
+        'size': find_col(['사이즈']), 
+        'packing': find_col(['Packing']), 
+        'open_qty': find_col(['오픈수량']),
+        'unit': find_col(['단위']), 
+        'doc_qty': find_col(['서류수량']), 
+        'box_qty': find_col(['박스수량']),
+        'price': find_col(['단가']), # '단가(USD)' -> 공백제거로 '단가(USD)'
+        'open_amt': find_col(['오픈금액']), 
+        'doc_amt': find_col(['서류금액']),
+        'tt': find_col(['T/T']), 
+        'bank': find_col(['은행']), 
+        'usance': find_col(['Usance']), 
+        'at_sight': find_col(['AtSight']),
+        'open_date': find_col(['개설일']), 
+        'lc_no': find_col(['LCNo', 'L/C']), 
+        'inv_no': find_col(['Invoice']),
+        'bl_no': find_col(['BLNo', 'B/L']), 
+        'lg_no': find_col(['LG', 'L/G']), 
+        'insurance': find_col(['보험']),
+        'broker_date': find_col(['관세사']), 
+        'etd': find_col(['ETD']), 
+        'eta': find_col(['ETA']),
+        'arrival_date': find_col(['입고일']), 
+        'wh': find_col(['창고']), 
+        'real_in_qty': find_col(['실입고']),
+        'dest': find_col(['착지']), 
+        'note': find_col(['비고']), 
+        'doc_acc': find_col(['서류인수']),
+        'acc_rate': find_col(['인수수수료율']), 
+        'mat_date': find_col(['만기일']), 
+        'ext_date': find_col(['연장만기일']),
+        'acc_fee': find_col(['인수수수료']), # 율 제외됨 (find_col 순서 중요하지 않음, 키워드 정확도)
+        'dis_fee': find_col(['인수할인료']), 
+        'pay_date': find_col(['결제일']),
+        'pay_amt': find_col(['결제금액']), 
+        'ex_rate': find_col(['환율']), 
+        'balance': find_col(['잔액']), 
+        'avg_ex': find_col(['평균환율'])
     }
     
+    # 'agency' 재확인 (대행계약서와 혼동 방지)
     if col_map['agency'] and '계약서' in str(col_map['agency']):
+        col_map['agency'] = None # 초기화 후 다시 찾기 시도하거나 무시
         for c in cols:
             if '대행' in str(c) and '계약서' not in str(c): col_map['agency'] = c; break
 
+    # unit2 (단위2) 처리
     try:
         if col_map['price']:
             idx = cols.index(col_map['price'])
@@ -267,7 +317,9 @@ def parse_import_full_excel(df):
         else: col_map['unit2'] = None
     except: col_map['unit2'] = None
 
+    # 데이터 추출
     for idx, row in data_df.iterrows():
+        # 품명 필수
         if not col_map['name']: continue
         name_val = str(row.get(col_map['name'], '')).strip()
         if not name_val or name_val.lower() == 'nan': continue
@@ -282,57 +334,60 @@ def parse_import_full_excel(df):
             continue
             
         try:
+            # 헬퍼 함수로 값 추출 간소화
+            def get_val(key, parser=str):
+                col = col_map.get(key)
+                if col:
+                    val = row.get(col)
+                    return parser(val)
+                return 0.0 if parser == safe_float_parse else (None if parser == safe_date_parse else '')
+
             data = {
                 'product_id': pid, 'ck_code': ck_val,
-                'global_code': str(row.get(col_map['global'], '')).strip() if col_map['global'] else '',
-                'doojin_code': str(row.get(col_map['doojin'], '')).strip() if col_map['doojin'] else '',
-                'agency': str(row.get(col_map['agency'], '')).strip() if col_map['agency'] else '',
-                'agency_contract': str(row.get(col_map['agency_contract'], '')).strip() if col_map['agency_contract'] else '',
-                'supplier': str(row.get(col_map['supplier'], '')).strip() if col_map['supplier'] else '',
-                'origin': str(row.get(col_map['origin'], '')).strip() if col_map['origin'] else '',
-                'size': str(row.get(col_map['size'], '')).strip() if col_map['size'] else '',
-                'packing': str(row.get(col_map['packing'], '')).strip() if col_map['packing'] else '',
-                'open_qty': safe_float_parse(row.get(col_map['open_qty'])) if col_map['open_qty'] else 0,
-                'quantity': safe_float_parse(row.get(col_map['open_qty'])) if col_map['open_qty'] else 0,
-                'doc_qty': safe_float_parse(row.get(col_map['doc_qty'])) if col_map['doc_qty'] else 0,
-                'box_qty': safe_float_parse(row.get(col_map['box_qty'])) if col_map['box_qty'] else 0,
-                'unit2': str(row.get(col_map['unit2'], '')).strip() if col_map['unit2'] else '',
-                'unit_price': safe_float_parse(row.get(col_map['price'])) if col_map['price'] else 0,
-                'open_amount': safe_float_parse(row.get(col_map['open_amt'])) if col_map['open_amt'] else 0,
-                'doc_amount': safe_float_parse(row.get(col_map['doc_amt'])) if col_map['doc_amt'] else 0,
-                'tt_check': str(row.get(col_map['tt'], '')).strip() if col_map['tt'] else '',
-                'bank': str(row.get(col_map['bank'], '')).strip() if col_map['bank'] else '',
-                'usance': str(row.get(col_map['usance'], '')).strip() if col_map['usance'] else '',
-                'at_sight': str(row.get(col_map['at_sight'], '')).strip() if col_map['at_sight'] else '',
-                'open_date': safe_date_parse(row.get(col_map['open_date'])) if col_map['open_date'] else None,
-                'lc_no': str(row.get(col_map['lc_no'], '')).strip() if col_map['lc_no'] else '',
-                'invoice_no': str(row.get(col_map['inv_no'], '')).strip() if col_map['inv_no'] else '',
-                'bl_no': str(row.get(col_map['bl_no'], '')).strip() if col_map['bl_no'] else '',
-                'lg_no': str(row.get(col_map['lg_no'], '')).strip() if col_map['lg_no'] else '',
-                'insurance': str(row.get(col_map['insurance'], '')).strip() if col_map['insurance'] else '',
-                'customs_broker_date': safe_date_parse(row.get(col_map['broker_date'])) if col_map['broker_date'] else None,
-                'etd': safe_date_parse(row.get(col_map['etd'])) if col_map['etd'] else None,
-                'expected_date': safe_date_parse(row.get(col_map['eta'])) if col_map['eta'] else get_kst_today(),
-                'arrival_date': safe_date_parse(row.get(col_map['arrival_date'])) if col_map['arrival_date'] else None,
-                'warehouse': str(row.get(col_map['wh'], '')).strip() if col_map['wh'] else '',
-                'actual_in_qty': safe_float_parse(row.get(col_map['real_in_qty'])) if col_map['real_in_qty'] else 0,
-                'destination': str(row.get(col_map['dest'], '')).strip() if col_map['dest'] else '',
-                'note': str(row.get(col_map['note'], '')).strip() if col_map['note'] else '',
-                'doc_acceptance': safe_date_parse(row.get(col_map['doc_acc'])) if col_map['doc_acc'] else None,
-                'acceptance_rate': safe_float_parse(row.get(col_map['acc_rate'])) if col_map['acc_rate'] else 0,
-                'maturity_date': safe_date_parse(row.get(col_map['mat_date'])) if col_map['mat_date'] else None,
-                'ext_maturity_date': safe_date_parse(row.get(col_map['ext_date'])) if col_map['ext_date'] else None,
-                'acceptance_fee': safe_float_parse(row.get(col_map['acc_fee'])) if col_map['acc_fee'] else 0,
-                'discount_fee': safe_float_parse(row.get(col_map['dis_fee'])) if col_map['dis_fee'] else 0,
-                'payment_date': safe_date_parse(row.get(col_map['pay_date'])) if col_map['pay_date'] else None,
-                'payment_amount': safe_float_parse(row.get(col_map['pay_amt'])) if col_map['pay_amt'] else 0,
-                'exchange_rate': safe_float_parse(row.get(col_map['ex_rate'])) if col_map['ex_rate'] else 0,
-                'balance': safe_float_parse(row.get(col_map['balance'])) if col_map['balance'] else 0,
-                'avg_exchange_rate': safe_float_parse(row.get(col_map['avg_ex'])) if col_map['avg_ex'] else 0,
+                'global_code': get_val('global'), 'doojin_code': get_val('doojin'),
+                'agency': get_val('agency'), 'agency_contract': get_val('agency_contract'),
+                'supplier': get_val('supplier'), 'origin': get_val('origin'),
+                'size': get_val('size'), 'packing': get_val('packing'),
+                'open_qty': get_val('open_qty', safe_float_parse),
+                'quantity': get_val('open_qty', safe_float_parse), # 기본 수량
+                'doc_qty': get_val('doc_qty', safe_float_parse),
+                'box_qty': get_val('box_qty', safe_float_parse),
+                'unit2': get_val('unit2'),
+                'unit_price': get_val('price', safe_float_parse),
+                'open_amount': get_val('open_amt', safe_float_parse),
+                'doc_amount': get_val('doc_amt', safe_float_parse),
+                'tt_check': get_val('tt'), 'bank': get_val('bank'),
+                'usance': get_val('usance'), 'at_sight': get_val('at_sight'),
+                'open_date': get_val('open_date', safe_date_parse),
+                'lc_no': get_val('lc_no'), 'invoice_no': get_val('inv_no'),
+                'bl_no': get_val('bl_no'), 'lg_no': get_val('lg_no'), 'insurance': get_val('insurance'),
+                'customs_broker_date': get_val('broker_date', safe_date_parse),
+                'etd': get_val('etd', safe_date_parse),
+                'expected_date': get_val('eta', safe_date_parse) or get_kst_today(),
+                'arrival_date': get_val('arrival_date', safe_date_parse),
+                'warehouse': get_val('wh'), 
+                'actual_in_qty': get_val('real_in_qty', safe_float_parse),
+                'destination': get_val('dest'), 'note': get_val('note'),
+                'doc_acceptance': get_val('doc_acc', safe_date_parse),
+                'acceptance_rate': get_val('acc_rate', safe_float_parse),
+                'maturity_date': get_val('mat_date', safe_date_parse),
+                'ext_maturity_date': get_val('ext_date', safe_date_parse),
+                'acceptance_fee': get_val('acc_fee', safe_float_parse),
+                'discount_fee': get_val('dis_fee', safe_float_parse),
+                'payment_date': get_val('pay_date', safe_date_parse),
+                'payment_amount': get_val('pay_amt', safe_float_parse),
+                'exchange_rate': get_val('ex_rate', safe_float_parse),
+                'balance': get_val('balance', safe_float_parse),
+                'avg_exchange_rate': get_val('avg_ex', safe_float_parse),
                 'status': 'PENDING'
             }
+            # unit 처리 (단위) - 매핑에서 누락되었을 수 있으므로 별도 처리
+            data['unit'] = str(row.get(col_map.get('unit'), '')).strip() if col_map.get('unit') else ''
+
+            # NaN 문자열 처리
             for k, v in data.items():
                 if isinstance(v, str) and (v.lower() == 'nan' or v.lower() == 'nat'): data[k] = ''
+            
             valid_data.append(data)
         except Exception as e:
             errors.append(f"[행 {idx+header_row_idx+2}] 데이터 파싱 오류: {str(e)}")
@@ -501,11 +556,22 @@ with tab_manage:
         with sub_t2:
             st.subheader("엑셀 파일 업로드")
             st.caption("※ '수입' 탭 양식의 CSV 파일을 업로드하세요. '품명'이 시스템에 등록되어 있어야 합니다.")
-            up_file = st.file_uploader("파일 선택", type=['csv'])
+            up_file = st.file_uploader("파일 선택", type=['csv', 'xlsx'])
             if up_file:
                 if st.button("분석 및 등록 시작", use_container_width=True):
                     try:
-                        df_up = pd.read_csv(up_file)
+                        # 파일 포맷 및 인코딩 처리
+                        if up_file.name.endswith('.csv'):
+                            try:
+                                # utf-8 시도
+                                df_up = pd.read_csv(up_file)
+                            except:
+                                # 실패 시 cp949 시도 (한글 윈도우)
+                                up_file.seek(0)
+                                df_up = pd.read_csv(up_file, encoding='cp949')
+                        else:
+                            df_up = pd.read_excel(up_file)
+                            
                         valid_rows, err_list = parse_import_full_excel(df_up)
                         
                         if err_list:
@@ -524,7 +590,8 @@ with tab_manage:
                             st.toast(f"{cnt}건 일괄 등록 완료!")
                             time.sleep(1)
                             st.rerun()
-                    except Exception as e: st.error(f"오류 발생: {e}")
+                    except Exception as e:
+                        st.error(f"오류 발생: {e}")
 
     # [우측] 상세 입력 폼
     with col_form:
