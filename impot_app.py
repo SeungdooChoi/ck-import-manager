@@ -6,6 +6,7 @@ import time
 import pytz
 import re
 import io
+import json
 
 # ==========================================
 # 0. 기본 설정 및 스타일
@@ -50,6 +51,15 @@ st.markdown("""
     
     /* 데이터프레임 스타일 */
     .stDataFrame { font-size: 12px; }
+    
+    /* 동적 입력 필드 스타일 */
+    .dynamic-row {
+        background-color: #f8f9fa;
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 5px;
+        border: 1px solid #eee;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,7 +80,9 @@ try:
             ("doc_acceptance", "DATE"), ("acceptance_rate", "NUMERIC"), ("maturity_date", "DATE"),
             ("ext_maturity_date", "DATE"), ("acceptance_fee", "NUMERIC"), ("discount_fee", "NUMERIC"),
             ("payment_date", "DATE"), ("payment_amount", "NUMERIC"), ("exchange_rate", "NUMERIC"),
-            ("balance", "NUMERIC"), ("avg_exchange_rate", "NUMERIC")
+            ("balance", "NUMERIC"), ("avg_exchange_rate", "NUMERIC"),
+            # 통관 및 신고 정보 (JSONB로 저장하여 N개 데이터 지원)
+            ("clearance_info", "JSONB"), ("declaration_info", "JSONB")
         ]
         for col_name, col_type in cols_to_add:
             s.execute(text(f"ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS {col_name} {col_type};"))
@@ -132,13 +144,17 @@ def save_full_schedule(data, sid=None):
                 'tt_check', 'bank', 'usance', 'at_sight', 'open_date', 'lc_no', 'invoice_no', 'bl_no', 'lg_no', 'insurance',
                 'customs_broker_date', 'etd', 'arrival_date', 'warehouse', 'actual_in_qty', 'destination',
                 'doc_acceptance', 'acceptance_rate', 'maturity_date', 'ext_maturity_date', 'acceptance_fee', 'discount_fee',
-                'payment_date', 'payment_amount', 'exchange_rate', 'balance', 'avg_exchange_rate'
+                'payment_date', 'payment_amount', 'exchange_rate', 'balance', 'avg_exchange_rate',
+                'clearance_info', 'declaration_info'
             ]
             
             # 숫자형 컬럼 리스트 (0으로 처리할 것들)
             numeric_cols = ['quantity', 'unit_price', 'open_qty', 'doc_qty', 'box_qty', 'open_amount', 'doc_amount', 
                             'actual_in_qty', 'acceptance_rate', 'acceptance_fee', 'discount_fee', 'payment_amount', 
                             'exchange_rate', 'balance', 'avg_exchange_rate']
+            
+            # JSON 컬럼 리스트
+            json_cols = ['clearance_info', 'declaration_info']
 
             params = {}
             for k in cols:
@@ -149,6 +165,14 @@ def save_full_schedule(data, sid=None):
                     else:
                         try: params[k] = float(val)
                         except: params[k] = 0
+                elif k in json_cols:
+                    # JSON 데이터 처리
+                    if isinstance(val, (list, dict)):
+                        params[k] = json.dumps(val, ensure_ascii=False)
+                    elif isinstance(val, str) and (val.startswith('[') or val.startswith('{')):
+                        params[k] = val # 이미 JSON 문자열인 경우
+                    else:
+                        params[k] = '[]' # 기본값
                 else:
                     if val is None or str(val).strip() == '' or str(val).lower() == 'nan':
                         params[k] = None
@@ -156,14 +180,14 @@ def save_full_schedule(data, sid=None):
                         params[k] = val
 
             if sid:
-                set_clause = ", ".join([f"{col} = :{col}" for col in cols])
+                set_clause = ", ".join([f"{col} = :{col} for jsonb" if col in json_cols else f"{col} = :{col}" for col in cols]).replace(" for jsonb", "::jsonb")
                 sql = f"UPDATE import_schedules SET {set_clause} WHERE id = :id"
                 params['id'] = sid
                 s.execute(text(sql), params)
                 msg = "수정 완료"
             else:
                 col_str = ", ".join(cols)
-                val_str = ", ".join([f":{col}" for col in cols])
+                val_str = ", ".join([f":{col}::jsonb" if col in json_cols else f":{col}" for col in cols])
                 sql = f"INSERT INTO import_schedules ({col_str}) VALUES ({val_str})"
                 if 'status' not in params or not params['status']:
                     params['status'] = 'PENDING'
@@ -186,16 +210,16 @@ def delete_schedule(sid):
 def safe_date_parse(val):
     if pd.isna(val) or str(val).strip() == '': return None
     try:
-        if isinstance(val, datetime): return val.date()
+        if isinstance(val, datetime): return val.strftime('%Y-%m-%d') # 문자열로 반환 (JSON 저장 등 호환성)
         s_val = str(val).strip()
         if re.match(r'^\d{2}/\d{2}/\d{2}$', s_val): # 25/01/01
             dt = datetime.strptime(s_val, "%y/%m/%d")
             if dt.year < 2000: dt = dt.replace(year=dt.year+2000)
-            return dt.date()
-        if re.match(r'^\d{4}-\d{2}-\d{2}$', s_val): return datetime.strptime(s_val, "%Y-%m-%d").date()
-        if re.match(r'^\d{4}\.\d{2}\.\d{2}$', s_val): return datetime.strptime(s_val, "%Y.%m.%d").date()
-        if re.match(r'^\d{8}$', s_val): return datetime.strptime(s_val, "%Y%m%d").date()
-        return pd.to_datetime(val).date()
+            return dt.strftime('%Y-%m-%d')
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', s_val): return datetime.strptime(s_val, "%Y-%m-%d").strftime('%Y-%m-%d')
+        if re.match(r'^\d{4}\.\d{2}\.\d{2}$', s_val): return datetime.strptime(s_val, "%Y.%m.%d").strftime('%Y-%m-%d')
+        if re.match(r'^\d{8}$', s_val): return datetime.strptime(s_val, "%Y%m%d").strftime('%Y-%m-%d')
+        return pd.to_datetime(val).strftime('%Y-%m-%d')
     except: return None
 
 def safe_float_parse(val):
@@ -204,7 +228,10 @@ def safe_float_parse(val):
     except: return 0.0
 
 def parse_import_full_excel(df):
-    """'수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱"""
+    """
+    '수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱
+    헤더를 찾아 컬럼 매핑 후 데이터 추출
+    """
     valid_data = []
     errors = []
     
@@ -212,27 +239,19 @@ def parse_import_full_excel(df):
     if p_df.empty: return [], ["시스템에 등록된 품목이 없습니다."]
     product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
-    # 1. 헤더 행 찾기 (스코어링 방식 강화)
+    # 1. 헤더 행 찾기 (스코어링 방식)
     keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
     max_score = 0
     header_row_idx = -1
     
     if df.empty: return [], ["파일 내용이 없습니다."]
 
-    # 상위 20행 검사
     for i in range(min(20, len(df))):
-        # 행의 모든 값을 하나의 문자열로 합침 (NaN 제외)
         row_vals = [str(x).strip() for x in df.iloc[i].values if pd.notna(x)]
         row_str = " ".join(row_vals)
-        
         score = 0
         for k in keywords:
             if k in row_str: score += 1
-        
-        # 'CK' 또는 '관리번호' 와 '품명' 이 동시에 있으면 가산점
-        if ('CK' in row_str or '관리번호' in row_str) and '품명' in row_str:
-            score += 5
-            
         if score > max_score and score >= 2:
             max_score = score
             header_row_idx = i
@@ -241,23 +260,21 @@ def parse_import_full_excel(df):
 
     # 2. 헤더 설정
     df.columns = df.iloc[header_row_idx]
-    # 컬럼 이름 정제: 줄바꿈, 공백 등 모든 공백 문자 제거
     df.columns = [str(c).replace('\n', '').replace('\r', '').replace(' ', '').strip() for c in df.columns]
     
     data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
     cols = list(data_df.columns)
     
-    # 3. 컬럼 매핑 (공백 제거된 컬럼명 기준)
+    # 3. 컬럼 매핑
     def find_col(keywords):
         for c in cols:
-            # 컬럼명에서도 공백 제거 후 비교
             c_clean = str(c).upper().strip()
             for k in keywords:
                 k_clean = k.upper().replace(" ", "").replace("\n", "")
                 if k_clean in c_clean: return c
         return None
 
-    # 매핑 키워드도 공백 없이 검색하도록 수정
+    # 컬럼 매핑 정의
     col_map = {
         'ck': find_col(['CK', '관리번호']), 'global': find_col(['글로벌']), 'doojin': find_col(['두진']),
         'agency': find_col(['대행']), 'agency_contract': find_col(['대행계약서']),
@@ -288,6 +305,7 @@ def parse_import_full_excel(df):
         else: col_map['unit2'] = None
     except: col_map['unit2'] = None
 
+    # 데이터 추출
     for idx, row in data_df.iterrows():
         if not col_map['name']: continue
         name_val = str(row.get(col_map['name'], '')).strip()
@@ -303,12 +321,45 @@ def parse_import_full_excel(df):
             continue
             
         try:
+            # 헬퍼 함수
             def get_val(key, parser=str):
                 col = col_map.get(key)
                 if col:
                     val = row.get(col)
                     return parser(val)
                 return 0.0 if parser == safe_float_parse else (None if parser == safe_date_parse else '')
+
+            # 통관 정보 추출 (N개) - CSV 패턴: 통관일자, 통관수량, 통관환율, 통관일자2...
+            clearance_list = []
+            # 기본 세트
+            c_date = get_val('clear_date', safe_date_parse) # 매핑 필요
+            # 동적 컬럼 탐색
+            for i in range(1, 11): # 최대 10개까지 확인
+                suffix = str(i) if i > 1 else ""
+                # 키워드로 컬럼 찾기 (동적)
+                c_date_col = find_col([f"통관일자{suffix}", f"통관일자 {suffix}"])
+                c_qty_col = find_col([f"통관수량{suffix}", f"통관 수량{suffix}"])
+                c_rate_col = find_col([f"통관환율{suffix}", f"통관 환율{suffix}"])
+                
+                if c_date_col or c_qty_col:
+                    d_val = safe_date_parse(row.get(c_date_col)) if c_date_col else None
+                    q_val = safe_float_parse(row.get(c_qty_col)) if c_qty_col else 0.0
+                    r_val = safe_float_parse(row.get(c_rate_col)) if c_rate_col else 0.0
+                    if d_val or q_val > 0:
+                        clearance_list.append({"date": d_val, "qty": q_val, "rate": r_val})
+
+            # 수입신고 정보 추출 (N개) - CSV 패턴: 신고일, 신고번호, 신고일2...
+            declaration_list = []
+            for i in range(1, 11):
+                suffix = str(i) if i > 1 else ""
+                d_date_col = find_col([f"신고일{suffix}", f"신고일 {suffix}"])
+                d_no_col = find_col([f"신고번호{suffix}", f"신고번호 {suffix}"])
+                
+                if d_date_col or d_no_col:
+                    date_val = safe_date_parse(row.get(d_date_col)) if d_date_col else None
+                    no_val = str(row.get(d_no_col, '')).strip() if d_no_col else ''
+                    if date_val or no_val:
+                        declaration_list.append({"date": date_val, "no": no_val})
 
             data = {
                 'product_id': pid, 'ck_code': ck_val,
@@ -317,7 +368,7 @@ def parse_import_full_excel(df):
                 'supplier': get_val('supplier'), 'origin': get_val('origin'),
                 'size': get_val('size'), 'packing': get_val('packing'),
                 'open_qty': get_val('open_qty', safe_float_parse),
-                'quantity': get_val('open_qty', safe_float_parse), # 기본 수량
+                'quantity': get_val('open_qty', safe_float_parse),
                 'doc_qty': get_val('doc_qty', safe_float_parse),
                 'box_qty': get_val('box_qty', safe_float_parse),
                 'unit2': get_val('unit2'),
@@ -331,7 +382,7 @@ def parse_import_full_excel(df):
                 'bl_no': get_val('bl_no'), 'lg_no': get_val('lg_no'), 'insurance': get_val('insurance'),
                 'customs_broker_date': get_val('broker_date', safe_date_parse),
                 'etd': get_val('etd', safe_date_parse),
-                'expected_date': get_val('eta', safe_date_parse) or get_kst_today(),
+                'expected_date': get_val('eta', safe_date_parse) or get_kst_today(), # str type return
                 'arrival_date': get_val('arrival_date', safe_date_parse),
                 'warehouse': get_val('wh'), 
                 'actual_in_qty': get_val('real_in_qty', safe_float_parse),
@@ -347,9 +398,10 @@ def parse_import_full_excel(df):
                 'exchange_rate': get_val('ex_rate', safe_float_parse),
                 'balance': get_val('balance', safe_float_parse),
                 'avg_exchange_rate': get_val('avg_ex', safe_float_parse),
+                'clearance_info': clearance_list,
+                'declaration_info': declaration_list,
                 'status': 'PENDING'
             }
-            # unit 처리 (단위)
             data['unit'] = str(row.get(col_map.get('unit'), '')).strip() if col_map.get('unit') else ''
 
             for k, v in data.items():
@@ -377,12 +429,9 @@ with tab_status:
     if df.empty:
         st.info("등록된 수입 일정이 없습니다.")
     else:
-        # PENDING 상태인 것만 우선 필터링하거나 전체 보여주기
-        # 입항일(expected_date) 기준으로 그룹핑
         df['eta_str'] = pd.to_datetime(df['expected_date']).dt.strftime('%y/%m/%d')
         grouped = df.groupby('eta_str', sort=False)
         
-        # HTML 생성
         html_content = """
         <table style="width:100%; border-collapse: collapse; font-size:13px; text-align:center;">
             <thead>
@@ -400,7 +449,6 @@ with tab_status:
             <tbody>
         """
         
-        # 수정: groupby 순회 방식 변경 (name, group)
         for date_str, group in grouped:
             html_content += f"""
             <tr style="background-color:#e7f5ff; border-top:1px solid #dee2e6; border-bottom:1px solid #dee2e6;">
@@ -493,6 +541,9 @@ with tab_manage:
             if st.button("➕ 신규 등록 (빈 양식)", type="primary", use_container_width=True):
                 st.session_state['edit_mode'] = 'new'
                 st.session_state['selected_data'] = None
+                # 동적 필드 초기화
+                st.session_state['clearance_list'] = []
+                st.session_state['declaration_list'] = []
                 st.rerun()
                 
             st.markdown("---")
@@ -506,6 +557,18 @@ with tab_manage:
                         if st.button("상세/수정", key=f"sel_{row['id']}", use_container_width=True):
                             st.session_state['edit_mode'] = 'edit'
                             st.session_state['selected_data'] = row.to_dict()
+                            
+                            # JSON 파싱하여 세션에 로드
+                            try:
+                                clr_info = row['clearance_info']
+                                st.session_state['clearance_list'] = json.loads(clr_info) if clr_info else []
+                            except: st.session_state['clearance_list'] = []
+                            
+                            try:
+                                decl_info = row['declaration_info']
+                                st.session_state['declaration_list'] = json.loads(decl_info) if decl_info else []
+                            except: st.session_state['declaration_list'] = []
+                            
                             st.rerun()
             else: st.info("데이터가 없습니다.")
         
@@ -570,6 +633,10 @@ with tab_manage:
     with col_form:
         edit_mode = st.session_state.get('edit_mode', 'new')
         data = st.session_state.get('selected_data', {})
+        
+        # 동적 리스트 초기화
+        if 'clearance_list' not in st.session_state: st.session_state['clearance_list'] = []
+        if 'declaration_list' not in st.session_state: st.session_state['declaration_list'] = []
         
         title_prefix = "수정" if edit_mode == 'edit' else "신규 등록"
         st.subheader(f"📝 상세 정보 {title_prefix}")
@@ -643,6 +710,57 @@ with tab_manage:
                 payment_date = c3.date_input("결제일", value=data.get('payment_date'))
                 payment_amount = c4.number_input("결제 금액", value=float(data.get('payment_amount') or 0.0))
 
+                # --- 통관 정보 (동적 추가) ---
+                st.markdown("<div class='form-header'>통관 정보 (N차 가능)</div>", unsafe_allow_html=True)
+                # 폼 내부에서는 state 조작이 제한적이므로, 간단히 N개 슬롯을 보여주거나 
+                # form 밖에서 관리해야 하지만, 여기선 JSON 데이터를 텍스트로 보여주고 수정하는 방식이 아닌
+                # 폼 제출 시 기존 리스트 + 추가된 입력을 합치는 방식으로 구현 
+                # (Streamlit 폼 한계상 5개 고정 슬롯 제공 방식 사용)
+                
+                clr_data = st.session_state['clearance_list']
+                new_clr_list = []
+                
+                for i in range(5):
+                    # 기존 데이터 있으면 채우기
+                    def_date = None
+                    def_qty = 0.0
+                    def_rate = 0.0
+                    if i < len(clr_data):
+                        try:
+                            if clr_data[i].get('date'): def_date = datetime.strptime(clr_data[i]['date'], '%Y-%m-%d').date()
+                            def_qty = float(clr_data[i].get('qty', 0))
+                            def_rate = float(clr_data[i].get('rate', 0))
+                        except: pass
+                    
+                    cc1, cc2, cc3 = st.columns(3)
+                    cd = cc1.date_input(f"[{i+1}] 통관일자", value=def_date, key=f"clr_d_{i}")
+                    cq = cc2.number_input(f"[{i+1}] 통관수량", value=def_qty, key=f"clr_q_{i}")
+                    cr = cc3.number_input(f"[{i+1}] 통관환율", value=def_rate, key=f"clr_r_{i}")
+                    
+                    if cd or cq > 0:
+                        new_clr_list.append({"date": str(cd) if cd else None, "qty": cq, "rate": cr})
+
+                # --- 수입신고 정보 (동적 추가) ---
+                st.markdown("<div class='form-header'>수입신고 정보 (N차 가능)</div>", unsafe_allow_html=True)
+                decl_data = st.session_state['declaration_list']
+                new_decl_list = []
+                
+                for i in range(5):
+                    d_def_date = None
+                    d_def_no = ""
+                    if i < len(decl_data):
+                        try:
+                            if decl_data[i].get('date'): d_def_date = datetime.strptime(decl_data[i]['date'], '%Y-%m-%d').date()
+                            d_def_no = decl_data[i].get('no', "")
+                        except: pass
+                        
+                    dc1, dc2 = st.columns(2)
+                    dd = dc1.date_input(f"[{i+1}] 신고일", value=d_def_date, key=f"decl_d_{i}")
+                    dn = dc2.text_input(f"[{i+1}] 신고번호", value=d_def_no, key=f"decl_n_{i}")
+                    
+                    if dd or dn:
+                        new_decl_list.append({"date": str(dd) if dd else None, "no": dn})
+
                 st.markdown("<div class='form-header'>기타</div>", unsafe_allow_html=True)
                 note = st.text_area("비고", value=data.get('note', ''))
                 status = st.selectbox("진행 상태", ["PENDING", "ARRIVED", "CANCELED"], index=["PENDING", "ARRIVED", "CANCELED"].index(data.get('status', 'PENDING')))
@@ -662,7 +780,8 @@ with tab_manage:
                             'etd': etd, 'expected_date': eta, 'arrival_date': arrival_date, 'customs_broker_date': customs_broker_date,
                             'warehouse': warehouse, 'destination': destination, 'actual_in_qty': actual_in_qty,
                             'doc_acceptance': doc_acceptance, 'maturity_date': maturity_date, 'payment_date': payment_date,
-                            'payment_amount': payment_amount, 'note': note, 'status': status
+                            'payment_amount': payment_amount, 'note': note, 'status': status,
+                            'clearance_info': new_clr_list, 'declaration_info': new_decl_list
                         }
                         sid = data.get('id') if edit_mode == 'edit' else None
                         succ, msg = save_full_schedule(save_data, sid)
