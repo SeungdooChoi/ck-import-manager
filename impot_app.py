@@ -163,7 +163,7 @@ def save_full_schedule(data, sid=None):
                     if val is None or str(val).strip() == '':
                         params[k] = 0
                     else:
-                        try: params[k] = float(val)
+                        try: params[k] = float(str(val).replace(',', '').strip())
                         except: params[k] = 0
                 elif k in json_cols:
                     # JSON 데이터 처리
@@ -180,7 +180,7 @@ def save_full_schedule(data, sid=None):
                         params[k] = val
 
             if sid:
-                set_clause = ", ".join([f"{col} = :{col} for jsonb" if col in json_cols else f"{col} = :{col}" for col in cols]).replace(" for jsonb", "::jsonb")
+                set_clause = ", ".join([f"{col} = :{col}::jsonb" if col in json_cols else f"{col} = :{col}" for col in cols])
                 sql = f"UPDATE import_schedules SET {set_clause} WHERE id = :id"
                 params['id'] = sid
                 s.execute(text(sql), params)
@@ -210,7 +210,7 @@ def delete_schedule(sid):
 def safe_date_parse(val):
     if pd.isna(val) or str(val).strip() == '': return None
     try:
-        if isinstance(val, datetime): return val.strftime('%Y-%m-%d') # 문자열로 반환 (JSON 저장 등 호환성)
+        if isinstance(val, datetime): return val.strftime('%Y-%m-%d')
         s_val = str(val).strip()
         if re.match(r'^\d{2}/\d{2}/\d{2}$', s_val): # 25/01/01
             dt = datetime.strptime(s_val, "%y/%m/%d")
@@ -240,29 +240,45 @@ def parse_import_full_excel(df):
     product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
     # 1. 헤더 행 찾기 (스코어링 방식)
+    # Check current columns first (if read_csv picked up header correctly)
     keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
-    max_score = 0
+    
+    col_str = " ".join([str(c).strip() for c in df.columns])
+    score_cols = 0
+    for k in keywords:
+        if k in col_str: score_cols += 1
+    
+    data_df = pd.DataFrame()
     header_row_idx = -1
-    
-    if df.empty: return [], ["파일 내용이 없습니다."]
 
-    for i in range(min(20, len(df))):
-        row_vals = [str(x).strip() for x in df.iloc[i].values if pd.notna(x)]
-        row_str = " ".join(row_vals)
-        score = 0
-        for k in keywords:
-            if k in row_str: score += 1
-        if score > max_score and score >= 2:
-            max_score = score
-            header_row_idx = i
+    # 만약 현재 컬럼명이 헤더로 보인다면 (키워드 2개 이상 포함)
+    if score_cols >= 2 and ('CK' in col_str or '관리번호' in col_str) and '품명' in col_str:
+        data_df = df
+    else:
+        # 데이터프레임이 비어있으면 리턴
+        if df.empty: return [], ["파일 내용이 없습니다."]
+
+        max_score = 0
+        for i in range(min(20, len(df))):
+            row_vals = [str(x).strip() for x in df.iloc[i].values if pd.notna(x)]
+            row_str = " ".join(row_vals)
+            score = 0
+            for k in keywords:
+                if k in row_str: score += 1
             
-    if header_row_idx == -1: return [], ["헤더('CK', '품명' 등)를 찾을 수 없습니다."]
+            if score > max_score and score >= 2:
+                max_score = score
+                header_row_idx = i
+                
+        if header_row_idx != -1:
+            # 헤더 설정
+            df.columns = df.iloc[header_row_idx]
+            data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
+        else:
+            return [], ["헤더('CK', '품명' 등)를 찾을 수 없습니다."]
 
-    # 2. 헤더 설정
-    df.columns = df.iloc[header_row_idx]
-    df.columns = [str(c).replace('\n', '').replace('\r', '').replace(' ', '').strip() for c in df.columns]
-    
-    data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
+    # 컬럼 이름 정제 (줄바꿈, 공백 제거)
+    data_df.columns = [str(c).replace('\n', '').replace('\r', '').replace(' ', '').strip() for c in data_df.columns]
     cols = list(data_df.columns)
     
     # 3. 컬럼 매핑
@@ -274,7 +290,6 @@ def parse_import_full_excel(df):
                 if k_clean in c_clean: return c
         return None
 
-    # 컬럼 매핑 정의
     col_map = {
         'ck': find_col(['CK', '관리번호']), 'global': find_col(['글로벌']), 'doojin': find_col(['두진']),
         'agency': find_col(['대행']), 'agency_contract': find_col(['대행계약서']),
@@ -317,7 +332,7 @@ def parse_import_full_excel(df):
         if ck_val.lower() == 'nan': ck_val = ""
         
         if not pid:
-            errors.append(f"[행 {idx+header_row_idx+2}] 알 수 없는 품목: '{name_val}' (CK: {ck_val})")
+            errors.append(f"[행 {idx+2}] 알 수 없는 품목: '{name_val}' (CK: {ck_val})")
             continue
             
         try:
@@ -329,14 +344,10 @@ def parse_import_full_excel(df):
                     return parser(val)
                 return 0.0 if parser == safe_float_parse else (None if parser == safe_date_parse else '')
 
-            # 통관 정보 추출 (N개) - CSV 패턴: 통관일자, 통관수량, 통관환율, 통관일자2...
+            # 통관 정보 추출
             clearance_list = []
-            # 기본 세트
-            c_date = get_val('clear_date', safe_date_parse) # 매핑 필요
-            # 동적 컬럼 탐색
-            for i in range(1, 11): # 최대 10개까지 확인
+            for i in range(1, 11):
                 suffix = str(i) if i > 1 else ""
-                # 키워드로 컬럼 찾기 (동적)
                 c_date_col = find_col([f"통관일자{suffix}", f"통관일자 {suffix}"])
                 c_qty_col = find_col([f"통관수량{suffix}", f"통관 수량{suffix}"])
                 c_rate_col = find_col([f"통관환율{suffix}", f"통관 환율{suffix}"])
@@ -348,7 +359,7 @@ def parse_import_full_excel(df):
                     if d_val or q_val > 0:
                         clearance_list.append({"date": d_val, "qty": q_val, "rate": r_val})
 
-            # 수입신고 정보 추출 (N개) - CSV 패턴: 신고일, 신고번호, 신고일2...
+            # 수입신고 정보 추출
             declaration_list = []
             for i in range(1, 11):
                 suffix = str(i) if i > 1 else ""
@@ -382,7 +393,7 @@ def parse_import_full_excel(df):
                 'bl_no': get_val('bl_no'), 'lg_no': get_val('lg_no'), 'insurance': get_val('insurance'),
                 'customs_broker_date': get_val('broker_date', safe_date_parse),
                 'etd': get_val('etd', safe_date_parse),
-                'expected_date': get_val('eta', safe_date_parse) or get_kst_today(), # str type return
+                'expected_date': get_val('eta', safe_date_parse) or get_kst_today(),
                 'arrival_date': get_val('arrival_date', safe_date_parse),
                 'warehouse': get_val('wh'), 
                 'actual_in_qty': get_val('real_in_qty', safe_float_parse),
@@ -408,7 +419,7 @@ def parse_import_full_excel(df):
                 if isinstance(v, str) and (v.lower() == 'nan' or v.lower() == 'nat'): data[k] = ''
             valid_data.append(data)
         except Exception as e:
-            errors.append(f"[행 {idx+header_row_idx+2}] 데이터 파싱 오류: {str(e)}")
+            errors.append(f"[행 {idx+2}] 데이터 파싱 오류: {str(e)}")
             
     return valid_data, errors
 
@@ -432,31 +443,11 @@ with tab_status:
         df['eta_str'] = pd.to_datetime(df['expected_date']).dt.strftime('%y/%m/%d')
         grouped = df.groupby('eta_str', sort=False)
         
-        html_content = """
-        <table style="width:100%; border-collapse: collapse; font-size:13px; text-align:center;">
-            <thead>
-                <tr style="background-color:#f1f3f5; border-bottom:2px solid #dee2e6;">
-                    <th style="padding:8px;">입항일</th>
-                    <th style="padding:8px;">공급사</th>
-                    <th style="padding:8px;">품명</th>
-                    <th style="padding:8px;">CK</th>
-                    <th style="padding:8px;">사이즈</th>
-                    <th style="padding:8px;">단가</th>
-                    <th style="padding:8px;">수량</th>
-                    <th style="padding:8px;">상태</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
+        # HTML 렌더링 (들여쓰기 제거하여 코드 블록 인식 방지)
+        html_content = """<table style="width:100%; border-collapse: collapse; font-size:13px; text-align:center;"><thead><tr style="background-color:#f1f3f5; border-bottom:2px solid #dee2e6;"><th style="padding:8px;">입항일</th><th style="padding:8px;">공급사</th><th style="padding:8px;">품명</th><th style="padding:8px;">CK</th><th style="padding:8px;">사이즈</th><th style="padding:8px;">단가</th><th style="padding:8px;">수량</th><th style="padding:8px;">상태</th></tr></thead><tbody>"""
         
         for date_str, group in grouped:
-            html_content += f"""
-            <tr style="background-color:#e7f5ff; border-top:1px solid #dee2e6; border-bottom:1px solid #dee2e6;">
-                <td colspan="8" style="padding:6px; font-weight:bold; text-align:left; padding-left:15px;">
-                    📅 {date_str} (총 {len(group)}건)
-                </td>
-            </tr>
-            """
+            html_content += f"""<tr style="background-color:#e7f5ff; border-top:1px solid #dee2e6; border-bottom:1px solid #dee2e6;"><td colspan="8" style="padding:6px; font-weight:bold; text-align:left; padding-left:15px;">📅 {date_str} (총 {len(group)}건)</td></tr>"""
             
             for _, row in group.iterrows():
                 status_cls = "status-pending" if row['status'] == 'PENDING' else ("status-arrived" if row['status'] == 'ARRIVED' else "status-canceled")
@@ -468,18 +459,7 @@ with tab_status:
                 qty_val = f"{int(row['quantity']):,}" if row['quantity'] else "0"
                 price_val = f"${float(row['unit_price']):.2f}" if row['unit_price'] else "-"
                 
-                html_content += f"""
-                <tr style="border-bottom:1px solid #f1f3f5;">
-                    <td style="padding:6px; color:#868e96;">{date_str}</td>
-                    <td style="padding:6px;">{supp_val}</td>
-                    <td style="padding:6px; font-weight:bold;">{row['product_name']}</td>
-                    <td style="padding:6px; font-family:monospace; color:#495057;">{ck_val}</td>
-                    <td style="padding:6px;">{size_val}</td>
-                    <td style="padding:6px;">{price_val}</td>
-                    <td style="padding:6px; font-weight:bold; color:#1c7ed6;">{qty_val}</td>
-                    <td style="padding:6px;"><span class="status-badge {status_cls}">{status_txt}</span></td>
-                </tr>
-                """
+                html_content += f"""<tr style="border-bottom:1px solid #f1f3f5;"><td style="padding:6px; color:#868e96;">{date_str}</td><td style="padding:6px;">{supp_val}</td><td style="padding:6px; font-weight:bold;">{row['product_name']}</td><td style="padding:6px; font-family:monospace; color:#495057;">{ck_val}</td><td style="padding:6px;">{size_val}</td><td style="padding:6px;">{price_val}</td><td style="padding:6px; font-weight:bold; color:#1c7ed6;">{qty_val}</td><td style="padding:6px;"><span class="status-badge {status_cls}">{status_txt}</span></td></tr>"""
         
         html_content += "</tbody></table>"
         st.markdown(html_content, unsafe_allow_html=True)
@@ -600,10 +580,13 @@ with tab_manage:
             if up_file:
                 if st.button("분석 및 등록 시작", use_container_width=True):
                     try:
+                        # 파일 포맷 및 인코딩 처리
                         if up_file.name.endswith('.csv'):
                             try:
+                                # utf-8 시도
                                 df_up = pd.read_csv(up_file)
                             except:
+                                # 실패 시 cp949 시도 (한글 윈도우)
                                 up_file.seek(0)
                                 df_up = pd.read_csv(up_file, encoding='cp949')
                         else:
@@ -627,7 +610,8 @@ with tab_manage:
                             st.toast(f"{cnt}건 일괄 등록 완료!")
                             time.sleep(1)
                             st.rerun()
-                    except Exception as e: st.error(f"오류 발생: {e}")
+                    except Exception as e:
+                        st.error(f"오류 발생: {e}")
 
     # [우측] 상세 입력 폼
     with col_form:
