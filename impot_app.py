@@ -263,7 +263,8 @@ def safe_float_parse(val):
 
 def parse_import_full_excel(df):
     """
-    '수입장부-테스트중.csv' 형식 파싱
+    '수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱
+    헤더를 찾아 컬럼 매핑 후 데이터 추출
     """
     valid_data = []
     errors = []
@@ -274,81 +275,101 @@ def parse_import_full_excel(df):
         return [], ["시스템에 등록된 품목이 없습니다. 품목 관리 탭에서 먼저 품목을 등록하세요."]
     
     # 공백 제거/소문자 변환 매핑
-    product_map = {row['품목명'].replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
+    product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
-    # 1. 헤더 행 찾기 로직 강화
+    # 1. 헤더 행 찾기 로직 개선
+    # 데이터프레임 전체를 순회하며 헤더 후보 찾기
     header_row_idx = -1
     for i, row in df.iterrows():
         # 행의 모든 값을 하나의 문자열로 합쳐서 키워드 검색
-        row_str = " ".join([str(x).strip() for x in row.values])
+        # NaN 값은 빈 문자열로 처리
+        row_str = " ".join([str(x).strip() for x in row.values if pd.notna(x)])
+        
+        # 'CK' 와 '품명'이 포함된 행을 찾음 (조건 완화)
         if 'CK' in row_str and '품명' in row_str:
             header_row_idx = i
             break
             
     if header_row_idx == -1:
-        return [], ["헤더('CK', '품명')를 찾을 수 없습니다. 올바른 CSV 파일인지 확인하세요."]
+        # 두 번째 시도: '관리번호'가 있는 행 찾기 (제공된 CSV 예시 기준)
+        for i, row in df.iterrows():
+            row_str = " ".join([str(x).strip() for x in row.values if pd.notna(x)])
+            if '관리번호' in row_str and '품명' in row_str:
+                header_row_idx = i
+                break
+                
+    if header_row_idx == -1:
+        return [], ["헤더('CK' 또는 '관리번호', '품명')를 찾을 수 없습니다. '수입' 탭 양식인지 확인하세요."]
 
     # 2. 헤더 설정 및 데이터 슬라이싱
+    # 헤더 행을 컬럼명으로 설정
     df.columns = df.iloc[header_row_idx]
-    # 컬럼 이름의 공백/줄바꿈 정리 (중요!)
-    df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
     
+    # 컬럼 이름의 공백/줄바꿈 정리 (매우 중요!)
+    # \n, \r 등을 공백으로 치환하고 앞뒤 공백 제거
+    df.columns = [str(c).replace('\n', ' ').replace('\r', '').strip() for c in df.columns]
+    
+    # 헤더 다음 행부터 데이터로 사용
     data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
     cols = list(data_df.columns)
     
     # 3. 컬럼 인덱스 매핑 (유사어 처리)
     def find_col(keywords):
         for c in cols:
-            # 대소문자 무시 비교
-            c_str = str(c).upper()
+            # 대소문자 무시, 공백 무시 비교
+            c_clean = str(c).upper().replace(" ", "")
             for k in keywords:
-                if k.upper() in c_str: return c
+                k_clean = k.upper().replace(" ", "")
+                if k_clean in c_clean: return c
         return None
 
-    # 제공된 CSV의 실제 컬럼명 기반 매핑
+    # 제공된 CSV의 실제 컬럼명 기반 매핑 (줄바꿈/공백 대응 키워드)
     col_map = {
         'ck': find_col(['CK', '관리번호']),
         'global': find_col(['글로벌']),
         'doojin': find_col(['두진']),
-        'agency': find_col(['대행']),
-        'agency_contract': find_col(['대행 계약서', '대행계약서']),
+        'agency': find_col(['대행']), # 대행계약서와 구분 주의 (순서상 먼저 매칭될 수 있음)
+        # '대행'만 찾으면 '대행 계약서'도 매칭될 수 있으므로, 정확히 매칭하거나 제외 로직 필요
+        # 여기서는 find_col이 부분 일치이므로 '대행'이 '대행계약서'보다 먼저 나오면 문제 없음.
+        # 하지만 더 정확하게 하기 위해 리스트 순회하며 '대행'만 있는것 찾기 시도
+        'agency_contract': find_col(['대행계약서', '대행 계약서']),
         'supplier': find_col(['수출자', '수입자']),
         'origin': find_col(['원산지']),
         'name': find_col(['품명']),
         'size': find_col(['사이즈']),
         'packing': find_col(['Packing']),
-        'open_qty': find_col(['오픈 수량']),
+        'open_qty': find_col(['오픈수량', '오픈 수량']),
         'unit': find_col(['단위']), 
-        'doc_qty': find_col(['서류 수량']),
-        'box_qty': find_col(['박스 수량']),
+        'doc_qty': find_col(['서류수량', '서류 수량']),
+        'box_qty': find_col(['박스수량', '박스 수량']),
         'price': find_col(['단가']), # '단가(USD)'
         # 단위2는 단가 바로 뒤 컬럼이라고 가정
-        'open_amt': find_col(['오픈 금액', '오픈금액']),
-        'doc_amt': find_col(['서류 금액', '서류금액']),
+        'open_amt': find_col(['오픈금액', '오픈 금액']),
+        'doc_amt': find_col(['서류금액', '서류 금액']),
         'tt': find_col(['T/T']),
         'bank': find_col(['은행']),
         'usance': find_col(['Usance']),
-        'at_sight': find_col(['At Sight']),
+        'at_sight': find_col(['AtSight', 'At Sight']),
         'open_date': find_col(['개설일']),
-        'lc_no': find_col(['L/C No']),
+        'lc_no': find_col(['LCNo', 'L/C']),
         'inv_no': find_col(['Invoice']),
-        'bl_no': find_col(['B/L']),
-        'lg_no': find_col(['L/G']),
+        'bl_no': find_col(['BLNo', 'B/L']),
+        'lg_no': find_col(['LG', 'L/G']),
         'insurance': find_col(['보험']),
-        'broker_date': find_col(['관세사']), # '관세사 발송일'
+        'broker_date': find_col(['관세사', '관세사발송일']), 
         'etd': find_col(['ETD']),
         'eta': find_col(['ETA']),
         'arrival_date': find_col(['입고일']),
         'wh': find_col(['창고']),
-        'real_in_qty': find_col(['실입고']),
+        'real_in_qty': find_col(['실입고', '실입고수량']),
         'dest': find_col(['착지']),
         'note': find_col(['비고']),
         'doc_acc': find_col(['서류인수']),
-        'acc_rate': find_col(['인수 수수료율']),
+        'acc_rate': find_col(['인수수수료율', '인수 수수료율']),
         'mat_date': find_col(['만기일']),
-        'ext_date': find_col(['연장 만기일']),
-        'acc_fee': find_col(['인수 수수료']),
-        'dis_fee': find_col(['인수 할인료']),
+        'ext_date': find_col(['연장만기일', '연장 만기일']),
+        'acc_fee': find_col(['인수수수료', '인수 수수료']), # 율 제외
+        'dis_fee': find_col(['인수할인료', '인수 할인료']),
         'pay_date': find_col(['결제일']),
         'pay_amt': find_col(['결제금액', '결제 금액']),
         'ex_rate': find_col(['환율']),
@@ -356,6 +377,14 @@ def parse_import_full_excel(df):
         'avg_ex': find_col(['평균환율'])
     }
     
+    # 'agency' 재확인: '대행계약서'가 '대행'으로 잘못 잡히는 경우 방지
+    if col_map['agency'] and '계약서' in str(col_map['agency']):
+        # '대행'이라는 글자만 있고 '계약서'는 없는 컬럼을 다시 찾음
+        for c in cols:
+            if '대행' in str(c) and '계약서' not in str(c):
+                col_map['agency'] = c
+                break
+
     # unit2 (단위2) 컬럼 위치 찾기 (단가 컬럼 오른쪽)
     try:
         price_col_name = col_map['price']
@@ -372,6 +401,9 @@ def parse_import_full_excel(df):
 
     # 4. 데이터 파싱 루프
     for idx, row in data_df.iterrows():
+        # 품명 없으면 스킵
+        if not col_map['name']: continue # 품명 컬럼 자체를 못 찾음
+        
         name_val = str(row.get(col_map['name'], '')).strip()
         if not name_val or name_val.lower() == 'nan': continue
         
@@ -379,7 +411,7 @@ def parse_import_full_excel(df):
         search_key = name_val.replace(" ", "").lower()
         pid = product_map.get(search_key)
         
-        ck_val = str(row.get(col_map['ck'], '')).strip()
+        ck_val = str(row.get(col_map['ck'], '')).strip() if col_map['ck'] else ""
         if ck_val.lower() == 'nan': ck_val = ""
         
         if not pid:
@@ -391,52 +423,52 @@ def parse_import_full_excel(df):
             data = {
                 'product_id': pid,
                 'ck_code': ck_val,
-                'global_code': str(row.get(col_map['global'], '')).strip(),
-                'doojin_code': str(row.get(col_map['doojin'], '')).strip(),
-                'agency': str(row.get(col_map['agency'], '')).strip(),
-                'agency_contract': str(row.get(col_map['agency_contract'], '')).strip(),
-                'supplier': str(row.get(col_map['supplier'], '')).strip(),
-                'origin': str(row.get(col_map['origin'], '')).strip(),
-                'size': str(row.get(col_map['size'], '')).strip(),
-                'packing': str(row.get(col_map['packing'], '')).strip(),
-                'open_qty': safe_float_parse(row.get(col_map['open_qty'])),
+                'global_code': str(row.get(col_map['global'], '')).strip() if col_map['global'] else '',
+                'doojin_code': str(row.get(col_map['doojin'], '')).strip() if col_map['doojin'] else '',
+                'agency': str(row.get(col_map['agency'], '')).strip() if col_map['agency'] else '',
+                'agency_contract': str(row.get(col_map['agency_contract'], '')).strip() if col_map['agency_contract'] else '',
+                'supplier': str(row.get(col_map['supplier'], '')).strip() if col_map['supplier'] else '',
+                'origin': str(row.get(col_map['origin'], '')).strip() if col_map['origin'] else '',
+                'size': str(row.get(col_map['size'], '')).strip() if col_map['size'] else '',
+                'packing': str(row.get(col_map['packing'], '')).strip() if col_map['packing'] else '',
+                'open_qty': safe_float_parse(row.get(col_map['open_qty'])) if col_map['open_qty'] else 0,
                 # quantity는 open_qty를 기본값으로 사용
-                'quantity': safe_float_parse(row.get(col_map['open_qty'])),
-                'doc_qty': safe_float_parse(row.get(col_map['doc_qty'])),
-                'box_qty': safe_float_parse(row.get(col_map['box_qty'])),
-                'unit2': str(row.get(col_map['unit2'], '')).strip(),
-                'unit_price': safe_float_parse(row.get(col_map['price'])),
-                'open_amount': safe_float_parse(row.get(col_map['open_amt'])),
-                'doc_amount': safe_float_parse(row.get(col_map['doc_amt'])),
-                'tt_check': str(row.get(col_map['tt'], '')).strip(),
-                'bank': str(row.get(col_map['bank'], '')).strip(),
-                'usance': str(row.get(col_map['usance'], '')).strip(),
-                'at_sight': str(row.get(col_map['at_sight'], '')).strip(),
-                'open_date': safe_date_parse(row.get(col_map['open_date'])),
-                'lc_no': str(row.get(col_map['lc_no'], '')).strip(),
-                'invoice_no': str(row.get(col_map['inv_no'], '')).strip(),
-                'bl_no': str(row.get(col_map['bl_no'], '')).strip(),
-                'lg_no': str(row.get(col_map['lg_no'], '')).strip(),
-                'insurance': str(row.get(col_map['insurance'], '')).strip(),
-                'customs_broker_date': safe_date_parse(row.get(col_map['broker_date'])),
-                'etd': safe_date_parse(row.get(col_map['etd'])),
-                'expected_date': safe_date_parse(row.get(col_map['eta'])) or get_kst_today(),
-                'arrival_date': safe_date_parse(row.get(col_map['arrival_date'])),
-                'warehouse': str(row.get(col_map['wh'], '')).strip(),
-                'actual_in_qty': safe_float_parse(row.get(col_map['real_in_qty'])),
-                'destination': str(row.get(col_map['dest'], '')).strip(),
-                'note': str(row.get(col_map['note'], '')).strip(),
-                'doc_acceptance': safe_date_parse(row.get(col_map['doc_acc'])),
-                'acceptance_rate': safe_float_parse(row.get(col_map['acc_rate'])),
-                'maturity_date': safe_date_parse(row.get(col_map['mat_date'])),
-                'ext_maturity_date': safe_date_parse(row.get(col_map['ext_date'])),
-                'acceptance_fee': safe_float_parse(row.get(col_map['acc_fee'])),
-                'discount_fee': safe_float_parse(row.get(col_map['dis_fee'])),
-                'payment_date': safe_date_parse(row.get(col_map['pay_date'])),
-                'payment_amount': safe_float_parse(row.get(col_map['pay_amt'])),
-                'exchange_rate': safe_float_parse(row.get(col_map['ex_rate'])),
-                'balance': safe_float_parse(row.get(col_map['balance'])),
-                'avg_exchange_rate': safe_float_parse(row.get(col_map['avg_ex'])),
+                'quantity': safe_float_parse(row.get(col_map['open_qty'])) if col_map['open_qty'] else 0,
+                'doc_qty': safe_float_parse(row.get(col_map['doc_qty'])) if col_map['doc_qty'] else 0,
+                'box_qty': safe_float_parse(row.get(col_map['box_qty'])) if col_map['box_qty'] else 0,
+                'unit2': str(row.get(col_map['unit2'], '')).strip() if col_map['unit2'] else '',
+                'unit_price': safe_float_parse(row.get(col_map['price'])) if col_map['price'] else 0,
+                'open_amount': safe_float_parse(row.get(col_map['open_amt'])) if col_map['open_amt'] else 0,
+                'doc_amount': safe_float_parse(row.get(col_map['doc_amt'])) if col_map['doc_amt'] else 0,
+                'tt_check': str(row.get(col_map['tt'], '')).strip() if col_map['tt'] else '',
+                'bank': str(row.get(col_map['bank'], '')).strip() if col_map['bank'] else '',
+                'usance': str(row.get(col_map['usance'], '')).strip() if col_map['usance'] else '',
+                'at_sight': str(row.get(col_map['at_sight'], '')).strip() if col_map['at_sight'] else '',
+                'open_date': safe_date_parse(row.get(col_map['open_date'])) if col_map['open_date'] else None,
+                'lc_no': str(row.get(col_map['lc_no'], '')).strip() if col_map['lc_no'] else '',
+                'invoice_no': str(row.get(col_map['inv_no'], '')).strip() if col_map['inv_no'] else '',
+                'bl_no': str(row.get(col_map['bl_no'], '')).strip() if col_map['bl_no'] else '',
+                'lg_no': str(row.get(col_map['lg_no'], '')).strip() if col_map['lg_no'] else '',
+                'insurance': str(row.get(col_map['insurance'], '')).strip() if col_map['insurance'] else '',
+                'customs_broker_date': safe_date_parse(row.get(col_map['broker_date'])) if col_map['broker_date'] else None,
+                'etd': safe_date_parse(row.get(col_map['etd'])) if col_map['etd'] else None,
+                'expected_date': safe_date_parse(row.get(col_map['eta'])) if col_map['eta'] else get_kst_today(),
+                'arrival_date': safe_date_parse(row.get(col_map['arrival_date'])) if col_map['arrival_date'] else None,
+                'warehouse': str(row.get(col_map['wh'], '')).strip() if col_map['wh'] else '',
+                'actual_in_qty': safe_float_parse(row.get(col_map['real_in_qty'])) if col_map['real_in_qty'] else 0,
+                'destination': str(row.get(col_map['dest'], '')).strip() if col_map['dest'] else '',
+                'note': str(row.get(col_map['note'], '')).strip() if col_map['note'] else '',
+                'doc_acceptance': safe_date_parse(row.get(col_map['doc_acc'])) if col_map['doc_acc'] else None,
+                'acceptance_rate': safe_float_parse(row.get(col_map['acc_rate'])) if col_map['acc_rate'] else 0,
+                'maturity_date': safe_date_parse(row.get(col_map['mat_date'])) if col_map['mat_date'] else None,
+                'ext_maturity_date': safe_date_parse(row.get(col_map['ext_date'])) if col_map['ext_date'] else None,
+                'acceptance_fee': safe_float_parse(row.get(col_map['acc_fee'])) if col_map['acc_fee'] else 0,
+                'discount_fee': safe_float_parse(row.get(col_map['dis_fee'])) if col_map['dis_fee'] else 0,
+                'payment_date': safe_date_parse(row.get(col_map['pay_date'])) if col_map['pay_date'] else None,
+                'payment_amount': safe_float_parse(row.get(col_map['pay_amt'])) if col_map['pay_amt'] else 0,
+                'exchange_rate': safe_float_parse(row.get(col_map['ex_rate'])) if col_map['ex_rate'] else 0,
+                'balance': safe_float_parse(row.get(col_map['balance'])) if col_map['balance'] else 0,
+                'avg_exchange_rate': safe_float_parse(row.get(col_map['avg_ex'])) if col_map['avg_ex'] else 0,
                 'status': 'PENDING'
             }
             
