@@ -255,17 +255,28 @@ def parse_import_full_excel(df):
     # 공백 제거/소문자 변환 매핑
     product_map = {row['품목명'].replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
-    # 헤더 찾기 (CK, 품명, 수량 등이 있는 행)
+    # 헤더 찾기 (CK, 품명 등이 있는 행)
+    # 기존: '글로벌'까지 찾았으나, CSV 구조상 누락될 수 있어 완화
     header_row_idx = -1
     for i, row in df.iterrows():
         row_str = row.astype(str).str.cat()
-        if 'CK' in row_str and '품명' in row_str and '글로벌' in row_str:
+        # 'CK' 와 '품명'이 포함된 행을 찾음
+        if 'CK' in row_str and '품명' in row_str:
             header_row_idx = i
             break
             
     if header_row_idx == -1:
-        return [], ["헤더('CK', '글로벌', '품명')를 찾을 수 없습니다. '수입' 탭 양식인지 확인하세요."]
+        # 두 번째 시도: '관리번호'가 있는 행 찾기 (제공된 CSV 예시 기준)
+        for i, row in df.iterrows():
+            row_str = row.astype(str).str.cat()
+            if '관리번호' in row_str and '품명' in row_str:
+                header_row_idx = i
+                break
+                
+    if header_row_idx == -1:
+        return [], ["헤더('CK' 또는 '관리번호', '품명')를 찾을 수 없습니다. '수입' 탭 양식인지 확인하세요."]
 
+    # 헤더 설정 (헤더 행 다음부터 데이터)
     df.columns = df.iloc[header_row_idx]
     data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
     
@@ -277,8 +288,9 @@ def parse_import_full_excel(df):
             if any(k in c for k in keywords): return c
         return None
 
+    # 컬럼 매핑 (제공된 CSV 파일 구조 반영)
     col_map = {
-        'ck': find_col(['CK']),
+        'ck': find_col(['CK', '관리번호']), # 관리번호 컬럼도 CK로 인식
         'global': find_col(['글로벌']),
         'doojin': find_col(['두진']),
         'agency': find_col(['대행']),
