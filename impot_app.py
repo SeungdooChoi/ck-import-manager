@@ -208,6 +208,206 @@ def update_schedule_status(sid, new_status):
         return True, "상태 변경 완료"
     except Exception as e: return False, str(e)
 
+def safe_date_parse(val):
+    """다양한 날짜 형식을 date 객체로 변환"""
+    if pd.isna(val) or str(val).strip() == '': return None
+    try:
+        if isinstance(val, datetime): return val.date()
+        s_val = str(val).strip()
+        # 엑셀의 숫자형 날짜 (예: 45300) 등은 pandas가 이미 변환했을 수 있음
+        # 문자열 패턴 처리
+        if re.match(r'^\d{2}/\d{2}/\d{2}$', s_val): # 25/01/01
+            dt = datetime.strptime(s_val, "%y/%m/%d")
+            # 2000년대 보정
+            if dt.year < 2000: dt = dt.replace(year=dt.year+2000)
+            return dt.date()
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', s_val): # 2025-01-01
+            return datetime.strptime(s_val, "%Y-%m-%d").date()
+        if re.match(r'^\d{4}\.\d{2}\.\d{2}$', s_val): # 2025.01.01
+            return datetime.strptime(s_val, "%Y.%m.%d").date()
+        
+        # pandas to_datetime 시도
+        return pd.to_datetime(val).date()
+    except:
+        return None
+
+def safe_float_parse(val):
+    """문자열/숫자를 float으로 변환 (쉼표 제거)"""
+    if pd.isna(val) or str(val).strip() == '': return 0.0
+    try:
+        s_val = str(val).replace(',', '').strip()
+        return float(s_val)
+    except: return 0.0
+
+def parse_import_full_excel(df):
+    """
+    '수입' 탭(상세 장부) 구조의 엑셀 파일 파싱
+    헤더를 찾아 컬럼 매핑 후 데이터 추출
+    """
+    valid_data = []
+    errors = []
+    
+    # DB 품목 맵핑 (품명 -> ID)
+    p_df = get_products_df()
+    if p_df.empty:
+        return [], ["시스템에 등록된 품목이 없습니다. 품목 관리 탭에서 먼저 품목을 등록하세요."]
+    
+    # 공백 제거/소문자 변환 매핑
+    product_map = {row['품목명'].replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
+    
+    # 헤더 찾기 (CK, 품명, 수량 등이 있는 행)
+    header_row_idx = -1
+    for i, row in df.iterrows():
+        row_str = row.astype(str).str.cat()
+        if 'CK' in row_str and '품명' in row_str and '글로벌' in row_str:
+            header_row_idx = i
+            break
+            
+    if header_row_idx == -1:
+        return [], ["헤더('CK', '글로벌', '품명')를 찾을 수 없습니다. '수입' 탭 양식인지 확인하세요."]
+
+    df.columns = df.iloc[header_row_idx]
+    data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
+    
+    cols = data_df.columns.astype(str)
+    
+    # 컬럼 인덱스 찾기 (이름 기반)
+    def find_col(keywords):
+        for c in cols:
+            if any(k in c for k in keywords): return c
+        return None
+
+    col_map = {
+        'ck': find_col(['CK']),
+        'global': find_col(['글로벌']),
+        'doojin': find_col(['두진']),
+        'agency': find_col(['대행']),
+        'agency_contract': find_col(['대행계약서', '대행\n계약서']),
+        'supplier': find_col(['수출자', '수입자']),
+        'origin': find_col(['원산지']),
+        'name': find_col(['품명']),
+        'size': find_col(['사이즈']),
+        'packing': find_col(['Packing']),
+        'open_qty': find_col(['오픈', '오픈 수량', '오픈 \n수량']),
+        'unit': find_col(['단위']), # 첫번째 단위
+        'doc_qty': find_col(['서류', '서류\n수량']),
+        'box_qty': find_col(['박스', '박스\n수량']),
+        'price': find_col(['단가', '단가\n(USD)']),
+        'unit2': cols[list(cols).index(find_col(['단가', '단가\n(USD)']))+1] if find_col(['단가', '단가\n(USD)']) else None, # 단가 옆 컬럼
+        'open_amt': find_col(['오픈 금액', '오픈금액']),
+        'doc_amt': find_col(['서류 금액', '서류\n금액']),
+        'tt': find_col(['T/T']),
+        'bank': find_col(['은행']),
+        'usance': find_col(['Usance']),
+        'at_sight': find_col(['At', 'At\nSight']),
+        'open_date': find_col(['개설일']),
+        'lc_no': find_col(['L/C No', 'L/C No.']),
+        'inv_no': find_col(['Invoice', 'Invoice No.']),
+        'bl_no': find_col(['B/L', 'B/L No.']),
+        'lg_no': find_col(['L/G']),
+        'insurance': find_col(['보험']),
+        'broker_date': find_col(['관세사', '관세사 발송일']),
+        'etd': find_col(['ETD']),
+        'eta': find_col(['ETA']),
+        'arrival_date': find_col(['입고일']),
+        'wh': find_col(['창고']),
+        'real_in_qty': find_col(['실입고', '실입고\n수량']),
+        'dest': find_col(['착지']),
+        'note': find_col(['비고']),
+        'doc_acc': find_col(['서류인수']),
+        'acc_rate': find_col(['인수', '인수\n수수료율']),
+        'mat_date': find_col(['만기일']),
+        'ext_date': find_col(['연장', '연장 \n만기일']),
+        'acc_fee': find_col(['인수 수수료']),
+        'dis_fee': find_col(['인수할인료', '인수 할인료']),
+        'pay_date': find_col(['결제일']),
+        'pay_amt': find_col(['결제금액']),
+        'ex_rate': find_col(['환율']),
+        'balance': find_col(['잔액']),
+        'avg_ex': find_col(['평균환율'])
+    }
+
+    for idx, row in data_df.iterrows():
+        # 품명 없으면 스킵
+        name_val = str(row.get(col_map['name'], '')).strip()
+        if not name_val or name_val.lower() == 'nan': continue
+        
+        # 품목 매칭
+        search_key = name_val.replace(" ", "").lower()
+        pid = product_map.get(search_key)
+        
+        ck_val = str(row.get(col_map['ck'], '')).strip()
+        if ck_val.lower() == 'nan': ck_val = ""
+        
+        if not pid:
+            errors.append(f"[행 {idx+header_row_idx+2}] 알 수 없는 품목: '{name_val}' (CK: {ck_val})")
+            continue
+            
+        try:
+            # 데이터 추출 및 변환
+            data = {
+                'product_id': pid,
+                'ck_code': ck_val,
+                'global_code': str(row.get(col_map['global'], '')).strip(),
+                'doojin_code': str(row.get(col_map['doojin'], '')).strip(),
+                'agency': str(row.get(col_map['agency'], '')).strip(),
+                'agency_contract': str(row.get(col_map['agency_contract'], '')).strip(),
+                'supplier': str(row.get(col_map['supplier'], '')).strip(),
+                'origin': str(row.get(col_map['origin'], '')).strip(),
+                'size': str(row.get(col_map['size'], '')).strip(),
+                'packing': str(row.get(col_map['packing'], '')).strip(),
+                'open_qty': safe_float_parse(row.get(col_map['open_qty'])),
+                # quantity는 open_qty를 기본값으로 사용
+                'quantity': safe_float_parse(row.get(col_map['open_qty'])),
+                'doc_qty': safe_float_parse(row.get(col_map['doc_qty'])),
+                'box_qty': safe_float_parse(row.get(col_map['box_qty'])),
+                'unit2': str(row.get(col_map['unit2'], '')).strip(),
+                'unit_price': safe_float_parse(row.get(col_map['price'])),
+                'open_amount': safe_float_parse(row.get(col_map['open_amt'])),
+                'doc_amount': safe_float_parse(row.get(col_map['doc_amt'])),
+                'tt_check': str(row.get(col_map['tt'], '')).strip(),
+                'bank': str(row.get(col_map['bank'], '')).strip(),
+                'usance': str(row.get(col_map['usance'], '')).strip(),
+                'at_sight': str(row.get(col_map['at_sight'], '')).strip(),
+                'open_date': safe_date_parse(row.get(col_map['open_date'])),
+                'lc_no': str(row.get(col_map['lc_no'], '')).strip(),
+                'invoice_no': str(row.get(col_map['inv_no'], '')).strip(),
+                'bl_no': str(row.get(col_map['bl_no'], '')).strip(),
+                'lg_no': str(row.get(col_map['lg_no'], '')).strip(),
+                'insurance': str(row.get(col_map['insurance'], '')).strip(),
+                'customs_broker_date': safe_date_parse(row.get(col_map['broker_date'])),
+                'etd': safe_date_parse(row.get(col_map['etd'])),
+                'expected_date': safe_date_parse(row.get(col_map['eta'])) or get_kst_today(), # ETA 없으면 오늘
+                'arrival_date': safe_date_parse(row.get(col_map['arrival_date'])),
+                'warehouse': str(row.get(col_map['wh'], '')).strip(),
+                'actual_in_qty': safe_float_parse(row.get(col_map['real_in_qty'])),
+                'destination': str(row.get(col_map['dest'], '')).strip(),
+                'note': str(row.get(col_map['note'], '')).strip(),
+                'doc_acceptance': safe_date_parse(row.get(col_map['doc_acc'])),
+                'acceptance_rate': safe_float_parse(row.get(col_map['acc_rate'])),
+                'maturity_date': safe_date_parse(row.get(col_map['mat_date'])),
+                'ext_maturity_date': safe_date_parse(row.get(col_map['ext_date'])),
+                'acceptance_fee': safe_float_parse(row.get(col_map['acc_fee'])),
+                'discount_fee': safe_float_parse(row.get(col_map['dis_fee'])),
+                'payment_date': safe_date_parse(row.get(col_map['pay_date'])),
+                'payment_amount': safe_float_parse(row.get(col_map['pay_amt'])),
+                'exchange_rate': safe_float_parse(row.get(col_map['ex_rate'])),
+                'balance': safe_float_parse(row.get(col_map['balance'])),
+                'avg_exchange_rate': safe_float_parse(row.get(col_map['avg_ex'])),
+                'status': 'PENDING'
+            }
+            
+            # Nan 문자열 처리
+            for k, v in data.items():
+                if isinstance(v, str) and v.lower() == 'nan': data[k] = ''
+            
+            valid_data.append(data)
+            
+        except Exception as e:
+            errors.append(f"[행 {idx+header_row_idx+2}] 데이터 파싱 오류: {str(e)}")
+            
+    return valid_data, errors
+
 # ==========================================
 # 2. 메인 UI 구성
 # ==========================================
@@ -259,40 +459,70 @@ with tab_detail:
     
     # [좌측] 리스트 및 선택
     with col_list:
-        st.subheader("목록 선택")
-        df_list = get_full_schedule_data('ALL') # 전체 목록 불러오기
+        sub_t1, sub_t2 = st.tabs(["목록 선택", "엑셀 일괄 등록"])
         
-        # 검색 기능
-        search_txt = st.text_input("🔍 검색 (CK, 품명, B/L 등)", key="list_search")
-        if not df_list.empty and search_txt:
-            mask = df_list.apply(lambda x: x.astype(str).str.contains(search_txt, case=False).any(), axis=1)
-            df_list = df_list[mask]
-        
-        selected_id = None
-        
-        # 신규 등록 버튼
-        if st.button("➕ 신규 등록 모드", type="primary", use_container_width=True):
-            st.session_state['edit_mode'] = 'new'
-            st.session_state['selected_data'] = None
-            st.rerun()
+        with sub_t1:
+            st.subheader("등록 건 목록")
+            df_list = get_full_schedule_data('ALL') # 전체 목록 불러오기
             
-        st.markdown("---")
-        
-        if not df_list.empty:
-            for idx, row in df_list.iterrows():
-                # 카드 형태로 표시
-                label = f"**[{row['ck_code'] or 'NO-CK'}]** {row['product_name']}"
-                sub = f"{row['supplier'] or '미지정'} | ETA: {row['expected_date']} | {row['status']}"
+            # 검색 기능
+            search_txt = st.text_input("🔍 검색 (CK, 품명, B/L 등)", key="list_search")
+            if not df_list.empty and search_txt:
+                mask = df_list.apply(lambda x: x.astype(str).str.contains(search_txt, case=False).any(), axis=1)
+                df_list = df_list[mask]
+            
+            # 신규 등록 버튼
+            if st.button("➕ 신규 등록 (빈 양식)", type="primary", use_container_width=True):
+                st.session_state['edit_mode'] = 'new'
+                st.session_state['selected_data'] = None
+                st.rerun()
                 
-                with st.container(border=True):
-                    st.markdown(label)
-                    st.caption(sub)
-                    if st.button("상세/수정", key=f"sel_{row['id']}", use_container_width=True):
-                        st.session_state['edit_mode'] = 'edit'
-                        st.session_state['selected_data'] = row.to_dict()
-                        st.rerun()
-        else:
-            st.info("데이터가 없습니다.")
+            st.markdown("---")
+            
+            if not df_list.empty:
+                for idx, row in df_list.iterrows():
+                    # 카드 형태로 표시
+                    label = f"**[{row['ck_code'] or 'NO-CK'}]** {row['product_name']}"
+                    sub = f"{row['supplier'] or '미지정'} | ETA: {row['expected_date']} | {row['status']}"
+                    
+                    with st.container(border=True):
+                        st.markdown(label)
+                        st.caption(sub)
+                        if st.button("상세/수정", key=f"sel_{row['id']}", use_container_width=True):
+                            st.session_state['edit_mode'] = 'edit'
+                            st.session_state['selected_data'] = row.to_dict()
+                            st.rerun()
+            else:
+                st.info("데이터가 없습니다.")
+        
+        with sub_t2:
+            st.subheader("엑셀 파일 업로드")
+            st.caption("※ '수입' 탭 양식의 엑셀 파일을 업로드하세요. '품명'이 시스템에 등록되어 있어야 합니다.")
+            up_file = st.file_uploader("파일 선택", type=['xlsx', 'csv'])
+            if up_file:
+                if st.button("분석 및 등록 시작", use_container_width=True):
+                    try:
+                        df_up = pd.read_csv(up_file) if up_file.name.endswith('.csv') else pd.read_excel(up_file)
+                        valid_rows, err_list = parse_import_full_excel(df_up)
+                        
+                        if err_list:
+                            st.error(f"{len(err_list)}건의 에러가 있습니다.")
+                            with st.expander("에러 상세 보기"):
+                                for e in err_list: st.write(f"- {e}")
+                        
+                        if valid_rows:
+                            st.success(f"{len(valid_rows)}건의 유효 데이터를 찾았습니다.")
+                            prog = st.progress(0)
+                            cnt = 0
+                            for i, d in enumerate(valid_rows):
+                                ok, _ = save_full_schedule(d)
+                                if ok: cnt += 1
+                                prog.progress((i+1)/len(valid_rows))
+                            st.toast(f"{cnt}건 일괄 등록 완료!")
+                            time.sleep(1)
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"오류 발생: {e}")
 
     # [우측] 상세 입력 폼
     with col_form:
