@@ -17,94 +17,62 @@ def get_kst_today():
 
 st.markdown("""
 <style>
-    .block-container { max-width: 95% !important; padding-top: 1rem; }
-    .status-pending { color: #f59f00; font-weight: bold; }
-    .status-arrived { color: #0ca678; font-weight: bold; }
-    .status-canceled { color: #fa5252; font-weight: bold; }
-    div[data-testid="stExpander"] { border: 1px solid #dee2e6; border-radius: 4px; }
+    .block-container { max-width: 98% !important; padding-top: 1rem; }
     
-    /* 테이블 스타일 */
-    .dataframe { font-size: 11px !important; }
-    
+    /* 상태 배지 스타일 */
+    .status-badge { padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 0.8em; }
+    .status-pending { background-color: #fff3bf; color: #f08c00; }
+    .status-arrived { background-color: #d3f9d8; color: #2b8a3e; }
+    .status-canceled { background-color: #ffe3e3; color: #c92a2a; }
+
+    /* 메트릭 박스 스타일 */
     .metric-box {
-        background-color: #f1f3f5;
+        background-color: #f8f9fa;
         border: 1px solid #dee2e6;
         padding: 10px;
         border-radius: 8px;
         text-align: center;
         font-size: 14px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
     }
     
+    /* 폼 헤더 스타일 */
     .form-header {
-        font-weight: bold;
+        font-weight: 700;
         font-size: 1.1em;
         margin-top: 20px;
         margin-bottom: 10px;
-        border-bottom: 2px solid #eee;
+        border-bottom: 2px solid #e9ecef;
         padding-bottom: 5px;
-        color: #333;
+        color: #495057;
     }
+    
+    /* 데이터프레임 스타일 */
+    .stDataFrame { font-size: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
-# DB 연결 및 스키마 업데이트 (수입 탭의 모든 컬럼 반영)
+# DB 연결 및 스키마 업데이트
 try:
     conn = st.connection("supabase", type="sql")
     with conn.session as s:
-        # 기존 기본 컬럼 외 추가 컬럼
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS ck_code TEXT;"))
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS size TEXT;"))
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS unit_price NUMERIC;"))
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS supplier TEXT;"))
-        
-        # '수입' 탭 상세 컬럼 추가
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS global_code TEXT;")) # 글로벌
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS doojin_code TEXT;")) # 두진
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS agency TEXT;")) # 대행
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS agency_contract TEXT;")) # 대행계약서
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS origin TEXT;")) # 원산지
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS packing TEXT;")) # Packing
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS open_qty NUMERIC;")) # 오픈 수량
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS doc_qty NUMERIC;")) # 서류 수량
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS box_qty NUMERIC;")) # 박스 수량
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS unit2 TEXT;")) # 단위2 (KG 등)
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS open_amount NUMERIC;")) # 오픈 금액
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS doc_amount NUMERIC;")) # 서류 금액
-        
-        # L/C 및 금융 정보
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS tt_check TEXT;")) # T/T
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS bank TEXT;")) # 은행
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS usance TEXT;")) # Usance
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS at_sight TEXT;")) # At Sight
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS open_date DATE;")) # 개설일
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS lc_no TEXT;")) # L/C No.
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS invoice_no TEXT;")) # Invoice No.
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS bl_no TEXT;")) # B/L No.
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS lg_no TEXT;")) # L/G
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS insurance TEXT;")) # 보험
-        
-        # 물류 및 일정 정보
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS customs_broker_date DATE;")) # 관세사 발송일
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS etd DATE;")) # ETD
-        # expected_date는 ETA/입항일로 사용
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS arrival_date DATE;")) # 입고일 (실제)
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS warehouse TEXT;")) # 창고
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS actual_in_qty NUMERIC;")) # 실입고 수량
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS destination TEXT;")) # 착지
-        
-        # 결제 정보
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS doc_acceptance DATE;")) # 서류인수
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS acceptance_rate NUMERIC;")) # 인수 수수료율
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS maturity_date DATE;")) # 만기일
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS ext_maturity_date DATE;")) # 연장 만기일
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS acceptance_fee NUMERIC;")) # 인수 수수료
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS discount_fee NUMERIC;")) # 인수 할인료
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS payment_date DATE;")) # 결제일
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS payment_amount NUMERIC;")) # 결제금액
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS exchange_rate NUMERIC;")) # 환율
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS balance NUMERIC;")) # 잔액
-        s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS avg_exchange_rate NUMERIC;")) # 평균환율
-        
+        # 모든 필요한 컬럼이 존재하는지 확인하고 없으면 추가
+        cols_to_add = [
+            ("ck_code", "TEXT"), ("size", "TEXT"), ("unit_price", "NUMERIC"), ("supplier", "TEXT"),
+            ("global_code", "TEXT"), ("doojin_code", "TEXT"), ("agency", "TEXT"), ("agency_contract", "TEXT"),
+            ("origin", "TEXT"), ("packing", "TEXT"), ("open_qty", "NUMERIC"), ("doc_qty", "NUMERIC"),
+            ("box_qty", "NUMERIC"), ("unit2", "TEXT"), ("open_amount", "NUMERIC"), ("doc_amount", "NUMERIC"),
+            ("tt_check", "TEXT"), ("bank", "TEXT"), ("usance", "TEXT"), ("at_sight", "TEXT"),
+            ("open_date", "DATE"), ("lc_no", "TEXT"), ("invoice_no", "TEXT"), ("bl_no", "TEXT"),
+            ("lg_no", "TEXT"), ("insurance", "TEXT"), ("customs_broker_date", "DATE"), ("etd", "DATE"),
+            ("arrival_date", "DATE"), ("warehouse", "TEXT"), ("actual_in_qty", "NUMERIC"), ("destination", "TEXT"),
+            ("doc_acceptance", "DATE"), ("acceptance_rate", "NUMERIC"), ("maturity_date", "DATE"),
+            ("ext_maturity_date", "DATE"), ("acceptance_fee", "NUMERIC"), ("discount_fee", "NUMERIC"),
+            ("payment_date", "DATE"), ("payment_amount", "NUMERIC"), ("exchange_rate", "NUMERIC"),
+            ("balance", "NUMERIC"), ("avg_exchange_rate", "NUMERIC")
+        ]
+        for col_name, col_type in cols_to_add:
+            s.execute(text(f"ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS {col_name} {col_type};"))
         s.commit()
 except Exception as e:
     st.error(f"DB 연결 오류: .streamlit/secrets.toml을 확인하세요.\n{e}")
@@ -139,7 +107,6 @@ def register_new_product(code, name, cat, unit):
 def get_full_schedule_data(status_filter='ALL'):
     """모든 상세 정보를 포함한 데이터 조회"""
     with conn.session as s:
-        # 모든 컬럼 선택
         base_sql = """
             SELECT s.*, p.product_name, p.product_code as db_prod_code, p.unit as p_unit
             FROM import_schedules s
@@ -148,7 +115,7 @@ def get_full_schedule_data(status_filter='ALL'):
         if status_filter != 'ALL':
             base_sql += f" WHERE s.status = '{status_filter}'"
         
-        base_sql += " ORDER BY s.expected_date ASC, s.id DESC"
+        base_sql += " ORDER BY s.expected_date ASC, s.ck_code ASC"
         
         df = pd.DataFrame(s.execute(text(base_sql)).fetchall())
         return df
@@ -167,40 +134,36 @@ def save_full_schedule(data, sid=None):
                 'payment_date', 'payment_amount', 'exchange_rate', 'balance', 'avg_exchange_rate'
             ]
             
-            # 파라미터 딕셔너리 구성 (None 값 처리 및 기본값 설정)
+            # 숫자형 컬럼 리스트 (0으로 처리할 것들)
+            numeric_cols = ['quantity', 'unit_price', 'open_qty', 'doc_qty', 'box_qty', 'open_amount', 'doc_amount', 
+                            'actual_in_qty', 'acceptance_rate', 'acceptance_fee', 'discount_fee', 'payment_amount', 
+                            'exchange_rate', 'balance', 'avg_exchange_rate']
+
             params = {}
             for k in cols:
                 val = data.get(k)
-                # 숫자형 컬럼 리스트
-                numeric_cols = ['quantity', 'unit_price', 'open_qty', 'doc_qty', 'box_qty', 'open_amount', 'doc_amount', 
-                                'actual_in_qty', 'acceptance_rate', 'acceptance_fee', 'discount_fee', 'payment_amount', 
-                                'exchange_rate', 'balance', 'avg_exchange_rate']
-                
                 if k in numeric_cols:
-                    if val is None or val == '':
-                        params[k] = 0  # 숫자형 컬럼에 값이 없으면 0으로 저장
+                    if val is None or str(val).strip() == '':
+                        params[k] = 0
                     else:
-                        params[k] = val
+                        try: params[k] = float(val)
+                        except: params[k] = 0
                 else:
-                    # 문자열/날짜 컬럼
-                    if val is None or val == '':
-                        params[k] = None # DB NULL 처리를 위해 None
+                    if val is None or str(val).strip() == '' or str(val).lower() == 'nan':
+                        params[k] = None
                     else:
                         params[k] = val
 
             if sid:
-                # UPDATE
                 set_clause = ", ".join([f"{col} = :{col}" for col in cols])
                 sql = f"UPDATE import_schedules SET {set_clause} WHERE id = :id"
                 params['id'] = sid
                 s.execute(text(sql), params)
                 msg = "수정 완료"
             else:
-                # INSERT
                 col_str = ", ".join(cols)
                 val_str = ", ".join([f":{col}" for col in cols])
                 sql = f"INSERT INTO import_schedules ({col_str}) VALUES ({val_str})"
-                # status 기본값 설정 (신규 등록시)
                 if 'status' not in params or not params['status']:
                     params['status'] = 'PENDING'
                 s.execute(text(sql), params)
@@ -218,211 +181,109 @@ def delete_schedule(sid):
         return True, "삭제 완료"
     except Exception as e: return False, str(e)
 
-def update_schedule_status(sid, new_status):
-    try:
-        with conn.session as s:
-            s.execute(text("UPDATE import_schedules SET status = :st WHERE id = :sid"), {"st": new_status, "sid": sid})
-            s.commit()
-        return True, "상태 변경 완료"
-    except Exception as e: return False, str(e)
-
+# --- 유틸리티 함수 ---
 def safe_date_parse(val):
-    """다양한 날짜 형식을 date 객체로 변환"""
     if pd.isna(val) or str(val).strip() == '': return None
     try:
         if isinstance(val, datetime): return val.date()
         s_val = str(val).strip()
-        
-        # 엑셀 날짜 형식 다양하게 처리
-        # 25/01/01
-        if re.match(r'^\d{2}/\d{2}/\d{2}$', s_val): 
+        if re.match(r'^\d{2}/\d{2}/\d{2}$', s_val): # 25/01/01
             dt = datetime.strptime(s_val, "%y/%m/%d")
             if dt.year < 2000: dt = dt.replace(year=dt.year+2000)
             return dt.date()
-        # 2025-01-01
-        if re.match(r'^\d{4}-\d{2}-\d{2}$', s_val):
-            return datetime.strptime(s_val, "%Y-%m-%d").date()
-        # 2025.01.01
-        if re.match(r'^\d{4}\.\d{2}\.\d{2}$', s_val): 
-            return datetime.strptime(s_val, "%Y.%m.%d").date()
-        # 20250101
-        if re.match(r'^\d{8}$', s_val): 
-            return datetime.strptime(s_val, "%Y%m%d").date()
-            
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', s_val): return datetime.strptime(s_val, "%Y-%m-%d").date()
+        if re.match(r'^\d{4}\.\d{2}\.\d{2}$', s_val): return datetime.strptime(s_val, "%Y.%m.%d").date()
+        if re.match(r'^\d{8}$', s_val): return datetime.strptime(s_val, "%Y%m%d").date()
         return pd.to_datetime(val).date()
-    except:
-        return None
+    except: return None
 
 def safe_float_parse(val):
-    """문자열/숫자를 float으로 변환 (쉼표, 공백 제거)"""
     if pd.isna(val) or str(val).strip() == '': return 0.0
-    try:
-        s_val = str(val).replace(',', '').replace(' ', '').strip()
-        return float(s_val)
+    try: return float(str(val).replace(',', '').replace(' ', '').strip())
     except: return 0.0
 
 def parse_import_full_excel(df):
-    """
-    '수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱
-    헤더를 찾아 컬럼 매핑 후 데이터 추출
-    """
+    """'수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱"""
     valid_data = []
     errors = []
     
-    # DB 품목 맵핑 (품명 -> ID)
     p_df = get_products_df()
-    if p_df.empty:
-        return [], ["시스템에 등록된 품목이 없습니다. 품목 관리 탭에서 먼저 품목을 등록하세요."]
-    
-    # 공백 제거/소문자 변환 매핑
+    if p_df.empty: return [], ["시스템에 등록된 품목이 없습니다."]
     product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
-    # 1. 헤더 행 찾기 로직 개선
-    # 데이터프레임 전체를 순회하며 헤더 후보 찾기
+    # 헤더 찾기
     header_row_idx = -1
     for i, row in df.iterrows():
-        # 행의 모든 값을 하나의 문자열로 합쳐서 키워드 검색
-        # NaN 값은 빈 문자열로 처리
         row_str = " ".join([str(x).strip() for x in row.values if pd.notna(x)])
-        
-        # 'CK' 와 '품명'이 포함된 행을 찾음 (조건 완화)
         if 'CK' in row_str and '품명' in row_str:
-            header_row_idx = i
-            break
+            header_row_idx = i; break
             
     if header_row_idx == -1:
-        # 두 번째 시도: '관리번호'가 있는 행 찾기 (제공된 CSV 예시 기준)
         for i, row in df.iterrows():
             row_str = " ".join([str(x).strip() for x in row.values if pd.notna(x)])
             if '관리번호' in row_str and '품명' in row_str:
-                header_row_idx = i
-                break
+                header_row_idx = i; break
                 
-    if header_row_idx == -1:
-        return [], ["헤더('CK' 또는 '관리번호', '품명')를 찾을 수 없습니다. '수입' 탭 양식인지 확인하세요."]
+    if header_row_idx == -1: return [], ["헤더('CK' 또는 '관리번호', '품명')를 찾을 수 없습니다."]
 
-    # 2. 헤더 설정 및 데이터 슬라이싱
-    # 헤더 행을 컬럼명으로 설정
     df.columns = df.iloc[header_row_idx]
-    
-    # 컬럼 이름의 공백/줄바꿈 정리 (매우 중요!)
-    # \n, \r 등을 공백으로 치환하고 앞뒤 공백 제거
     df.columns = [str(c).replace('\n', ' ').replace('\r', '').strip() for c in df.columns]
-    
-    # 헤더 다음 행부터 데이터로 사용
     data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
     cols = list(data_df.columns)
     
-    # 3. 컬럼 인덱스 매핑 (유사어 처리)
     def find_col(keywords):
         for c in cols:
-            # 대소문자 무시, 공백 무시 비교
             c_clean = str(c).upper().replace(" ", "")
             for k in keywords:
-                k_clean = k.upper().replace(" ", "")
-                if k_clean in c_clean: return c
+                if k.upper().replace(" ", "") in c_clean: return c
         return None
 
-    # 제공된 CSV의 실제 컬럼명 기반 매핑 (줄바꿈/공백 대응 키워드)
     col_map = {
-        'ck': find_col(['CK', '관리번호']),
-        'global': find_col(['글로벌']),
-        'doojin': find_col(['두진']),
-        'agency': find_col(['대행']), # 대행계약서와 구분 주의 (순서상 먼저 매칭될 수 있음)
-        # '대행'만 찾으면 '대행 계약서'도 매칭될 수 있으므로, 정확히 매칭하거나 제외 로직 필요
-        # 여기서는 find_col이 부분 일치이므로 '대행'이 '대행계약서'보다 먼저 나오면 문제 없음.
-        # 하지만 더 정확하게 하기 위해 리스트 순회하며 '대행'만 있는것 찾기 시도
-        'agency_contract': find_col(['대행계약서', '대행 계약서']),
-        'supplier': find_col(['수출자', '수입자']),
-        'origin': find_col(['원산지']),
-        'name': find_col(['품명']),
-        'size': find_col(['사이즈']),
-        'packing': find_col(['Packing']),
-        'open_qty': find_col(['오픈수량', '오픈 수량']),
-        'unit': find_col(['단위']), 
-        'doc_qty': find_col(['서류수량', '서류 수량']),
-        'box_qty': find_col(['박스수량', '박스 수량']),
-        'price': find_col(['단가']), # '단가(USD)'
-        # 단위2는 단가 바로 뒤 컬럼이라고 가정
-        'open_amt': find_col(['오픈금액', '오픈 금액']),
-        'doc_amt': find_col(['서류금액', '서류 금액']),
-        'tt': find_col(['T/T']),
-        'bank': find_col(['은행']),
-        'usance': find_col(['Usance']),
-        'at_sight': find_col(['AtSight', 'At Sight']),
-        'open_date': find_col(['개설일']),
-        'lc_no': find_col(['LCNo', 'L/C']),
-        'inv_no': find_col(['Invoice']),
-        'bl_no': find_col(['BLNo', 'B/L']),
-        'lg_no': find_col(['LG', 'L/G']),
-        'insurance': find_col(['보험']),
-        'broker_date': find_col(['관세사', '관세사발송일']), 
-        'etd': find_col(['ETD']),
-        'eta': find_col(['ETA']),
-        'arrival_date': find_col(['입고일']),
-        'wh': find_col(['창고']),
-        'real_in_qty': find_col(['실입고', '실입고수량']),
-        'dest': find_col(['착지']),
-        'note': find_col(['비고']),
-        'doc_acc': find_col(['서류인수']),
-        'acc_rate': find_col(['인수수수료율', '인수 수수료율']),
-        'mat_date': find_col(['만기일']),
-        'ext_date': find_col(['연장만기일', '연장 만기일']),
-        'acc_fee': find_col(['인수수수료', '인수 수수료']), # 율 제외
-        'dis_fee': find_col(['인수할인료', '인수 할인료']),
-        'pay_date': find_col(['결제일']),
-        'pay_amt': find_col(['결제금액', '결제 금액']),
-        'ex_rate': find_col(['환율']),
-        'balance': find_col(['잔액']),
-        'avg_ex': find_col(['평균환율'])
+        'ck': find_col(['CK', '관리번호']), 'global': find_col(['글로벌']), 'doojin': find_col(['두진']),
+        'agency': find_col(['대행']), 'agency_contract': find_col(['대행계약서', '대행 계약서']),
+        'supplier': find_col(['수출자', '수입자']), 'origin': find_col(['원산지']), 'name': find_col(['품명']),
+        'size': find_col(['사이즈']), 'packing': find_col(['Packing']), 'open_qty': find_col(['오픈수량', '오픈 수량']),
+        'unit': find_col(['단위']), 'doc_qty': find_col(['서류수량', '서류 수량']), 'box_qty': find_col(['박스수량', '박스 수량']),
+        'price': find_col(['단가']), 'open_amt': find_col(['오픈금액', '오픈 금액']), 'doc_amt': find_col(['서류금액', '서류 금액']),
+        'tt': find_col(['T/T']), 'bank': find_col(['은행']), 'usance': find_col(['Usance']), 'at_sight': find_col(['AtSight', 'At Sight']),
+        'open_date': find_col(['개설일']), 'lc_no': find_col(['LCNo', 'L/C']), 'inv_no': find_col(['Invoice']),
+        'bl_no': find_col(['BLNo', 'B/L']), 'lg_no': find_col(['LG', 'L/G']), 'insurance': find_col(['보험']),
+        'broker_date': find_col(['관세사', '관세사발송일']), 'etd': find_col(['ETD']), 'eta': find_col(['ETA']),
+        'arrival_date': find_col(['입고일']), 'wh': find_col(['창고']), 'real_in_qty': find_col(['실입고', '실입고수량']),
+        'dest': find_col(['착지']), 'note': find_col(['비고']), 'doc_acc': find_col(['서류인수']),
+        'acc_rate': find_col(['인수수수료율', '인수 수수료율']), 'mat_date': find_col(['만기일']), 'ext_date': find_col(['연장만기일', '연장 만기일']),
+        'acc_fee': find_col(['인수수수료', '인수 수수료']), 'dis_fee': find_col(['인수할인료', '인수 할인료']), 'pay_date': find_col(['결제일']),
+        'pay_amt': find_col(['결제금액', '결제 금액']), 'ex_rate': find_col(['환율']), 'balance': find_col(['잔액']), 'avg_ex': find_col(['평균환율'])
     }
     
-    # 'agency' 재확인: '대행계약서'가 '대행'으로 잘못 잡히는 경우 방지
     if col_map['agency'] and '계약서' in str(col_map['agency']):
-        # '대행'이라는 글자만 있고 '계약서'는 없는 컬럼을 다시 찾음
         for c in cols:
-            if '대행' in str(c) and '계약서' not in str(c):
-                col_map['agency'] = c
-                break
+            if '대행' in str(c) and '계약서' not in str(c): col_map['agency'] = c; break
 
-    # unit2 (단위2) 컬럼 위치 찾기 (단가 컬럼 오른쪽)
     try:
-        price_col_name = col_map['price']
-        if price_col_name:
-            idx = cols.index(price_col_name)
-            if idx + 1 < len(cols):
-                col_map['unit2'] = cols[idx+1]
-            else:
-                col_map['unit2'] = None
-        else:
-            col_map['unit2'] = None
-    except:
-        col_map['unit2'] = None
+        if col_map['price']:
+            idx = cols.index(col_map['price'])
+            col_map['unit2'] = cols[idx+1] if idx + 1 < len(cols) else None
+        else: col_map['unit2'] = None
+    except: col_map['unit2'] = None
 
-    # 4. 데이터 파싱 루프
     for idx, row in data_df.iterrows():
-        # 품명 없으면 스킵
-        if not col_map['name']: continue # 품명 컬럼 자체를 못 찾음
-        
+        if not col_map['name']: continue
         name_val = str(row.get(col_map['name'], '')).strip()
         if not name_val or name_val.lower() == 'nan': continue
         
-        # 품목 매칭
         search_key = name_val.replace(" ", "").lower()
         pid = product_map.get(search_key)
-        
         ck_val = str(row.get(col_map['ck'], '')).strip() if col_map['ck'] else ""
         if ck_val.lower() == 'nan': ck_val = ""
         
         if not pid:
-            # 품목이 없으면 에러로 처리 (자동 등록 안 함)
             errors.append(f"[행 {idx+header_row_idx+2}] 알 수 없는 품목: '{name_val}' (CK: {ck_val})")
             continue
             
         try:
             data = {
-                'product_id': pid,
-                'ck_code': ck_val,
+                'product_id': pid, 'ck_code': ck_val,
                 'global_code': str(row.get(col_map['global'], '')).strip() if col_map['global'] else '',
                 'doojin_code': str(row.get(col_map['doojin'], '')).strip() if col_map['doojin'] else '',
                 'agency': str(row.get(col_map['agency'], '')).strip() if col_map['agency'] else '',
@@ -432,7 +293,6 @@ def parse_import_full_excel(df):
                 'size': str(row.get(col_map['size'], '')).strip() if col_map['size'] else '',
                 'packing': str(row.get(col_map['packing'], '')).strip() if col_map['packing'] else '',
                 'open_qty': safe_float_parse(row.get(col_map['open_qty'])) if col_map['open_qty'] else 0,
-                # quantity는 open_qty를 기본값으로 사용
                 'quantity': safe_float_parse(row.get(col_map['open_qty'])) if col_map['open_qty'] else 0,
                 'doc_qty': safe_float_parse(row.get(col_map['doc_qty'])) if col_map['doc_qty'] else 0,
                 'box_qty': safe_float_parse(row.get(col_map['box_qty'])) if col_map['box_qty'] else 0,
@@ -471,14 +331,9 @@ def parse_import_full_excel(df):
                 'avg_exchange_rate': safe_float_parse(row.get(col_map['avg_ex'])) if col_map['avg_ex'] else 0,
                 'status': 'PENDING'
             }
-            
-            # Nan 문자열 처리 ('nan' 문자열이 DB에 들어가지 않도록)
             for k, v in data.items():
-                if isinstance(v, str) and (v.lower() == 'nan' or v.lower() == 'nat'): 
-                    data[k] = ''
-            
+                if isinstance(v, str) and (v.lower() == 'nan' or v.lower() == 'nat'): data[k] = ''
             valid_data.append(data)
-            
         except Exception as e:
             errors.append(f"[행 {idx+header_row_idx+2}] 데이터 파싱 오류: {str(e)}")
             
@@ -488,49 +343,127 @@ def parse_import_full_excel(df):
 # 2. 메인 UI 구성
 # ==========================================
 
-st.title("🚢 수입 관리 시스템 (상세)")
+st.title("🚢 수입 관리 시스템")
 
-tab_status, tab_detail, tab_product = st.tabs(["📊 수입진행상황 (전체조회)", "📝 수입 상세 관리 (입력/수정)", "📦 품목 관리"])
+tab_status, tab_ledger, tab_manage, tab_product = st.tabs(["📊 수입진행상황", "📒 수입장부 (상세)", "📝 등록 및 관리", "📦 품목 관리"])
 
-# --- TAB 1: 수입진행상황 (전체조회) ---
+# --- TAB 1: 수입진행상황 (HTML 뷰) ---
 with tab_status:
-    st.markdown("### 📅 전체 수입 장부 조회")
+    st.markdown("### 📅 수입 진행 현황판")
     
-    col_f1, col_f2 = st.columns([1, 4])
-    with col_f1:
-        view_opt = st.radio("조회 상태", ["전체", "진행중 (PENDING)", "입고완료 (ARRIVED)"], index=0, horizontal=True)
+    df = get_full_schedule_data('ALL')
+    
+    if df.empty:
+        st.info("등록된 수입 일정이 없습니다.")
+    else:
+        # PENDING 상태인 것만 우선 필터링하거나 전체 보여주기 (여기선 전체 보여주되 정렬)
+        # 입항일(expected_date) 기준으로 그룹핑하여 보여주기
         
-    status_filter = 'ALL'
-    if "진행중" in view_opt: status_filter = 'PENDING'
-    elif "입고완료" in view_opt: status_filter = 'ARRIVED'
-    
-    df = get_full_schedule_data(status_filter)
-    
-    if not df.empty:
-        # 주요 컬럼만 추려서 보여주기 (너무 많으므로)
-        display_cols = [
-            'ck_code', 'supplier', 'product_name', 'size', 'quantity', 'unit_price', 'expected_date', 'status', 
-            'lc_no', 'bl_no', 'warehouse', 'arrival_date'
-        ]
+        # 날짜 포맷팅
+        df['eta_str'] = pd.to_datetime(df['expected_date']).dt.strftime('%y/%m/%d')
         
-        # 컬럼명 한글 매핑
-        col_map = {
-            'ck_code': 'CK', 'supplier': '수출자', 'product_name': '품명', 'size': '사이즈', 
-            'quantity': '수량', 'unit_price': '단가', 'expected_date': 'ETA(입항)', 'status': '상태',
-            'lc_no': 'L/C No.', 'bl_no': 'B/L No.', 'warehouse': '창고', 'arrival_date': '입고일'
+        grouped = df.groupby('eta_str', sort=False)
+        
+        # HTML 생성
+        html_content = """
+        <table style="width:100%; border-collapse: collapse; font-size:13px; text-align:center;">
+            <thead>
+                <tr style="background-color:#f1f3f5; border-bottom:2px solid #dee2e6;">
+                    <th style="padding:8px;">입항일</th>
+                    <th style="padding:8px;">공급사</th>
+                    <th style="padding:8px;">품명</th>
+                    <th style="padding:8px;">CK</th>
+                    <th style="padding:8px;">사이즈</th>
+                    <th style="padding:8px;">단가</th>
+                    <th style="padding:8px;">수량</th>
+                    <th style="padding:8px;">상태</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+        
+        for date_str, group in grouped:
+            # 날짜 헤더 (그룹)
+            html_content += f"""
+            <tr style="background-color:#e7f5ff; border-top:1px solid #dee2e6; border-bottom:1px solid #dee2e6;">
+                <td colspan="8" style="padding:6px; font-weight:bold; text-align:left; padding-left:15px;">
+                    📅 {date_str} (총 {len(group)}건)
+                </td>
+            </tr>
+            """
+            
+            for _, row in group.iterrows():
+                status_cls = "status-pending" if row['status'] == 'PENDING' else ("status-arrived" if row['status'] == 'ARRIVED' else "status-canceled")
+                status_txt = "진행중" if row['status'] == 'PENDING' else ("입고완료" if row['status'] == 'ARRIVED' else "취소")
+                
+                ck_val = row['ck_code'] if row['ck_code'] else "-"
+                supp_val = row['supplier'] if row['supplier'] else "-"
+                size_val = row['size'] if row['size'] else "-"
+                qty_val = f"{int(row['quantity']):,}" if row['quantity'] else "0"
+                price_val = f"${float(row['unit_price']):.2f}" if row['unit_price'] else "-"
+                
+                html_content += f"""
+                <tr style="border-bottom:1px solid #f1f3f5;">
+                    <td style="padding:6px; color:#868e96;">{date_str}</td>
+                    <td style="padding:6px;">{supp_val}</td>
+                    <td style="padding:6px; font-weight:bold;">{row['product_name']}</td>
+                    <td style="padding:6px; font-family:monospace; color:#495057;">{ck_val}</td>
+                    <td style="padding:6px;">{size_val}</td>
+                    <td style="padding:6px;">{price_val}</td>
+                    <td style="padding:6px; font-weight:bold; color:#1c7ed6;">{qty_val}</td>
+                    <td style="padding:6px;"><span class="status-badge {status_cls}">{status_txt}</span></td>
+                </tr>
+                """
+        
+        html_content += "</tbody></table>"
+        st.markdown(html_content, unsafe_allow_html=True)
+
+# --- TAB 2: 수입장부 (상세 표) ---
+with tab_ledger:
+    st.markdown("### 📒 수입장부 상세 내역")
+    
+    col_l1, col_l2 = st.columns([1, 5])
+    with col_l1:
+        view_filter = st.selectbox("상태 필터", ["전체", "진행중", "완료/취소"])
+    
+    db_filter = 'ALL'
+    if view_filter == "진행중": db_filter = 'PENDING'
+    elif view_filter == "완료/취소": db_filter = 'ARRIVED' # 단순화 (취소 포함하려면 로직 수정 필요하나 일단 ARRIVED로)
+    
+    df_ledger = get_full_schedule_data(db_filter)
+    
+    if df_ledger.empty:
+        st.info("데이터가 없습니다.")
+    else:
+        # 표시할 컬럼 정의 및 한글 매핑
+        cols_map = {
+            'ck_code': 'CK관리번호', 'global_code': '글로벌', 'doojin_code': '두진',
+            'supplier': '수출자', 'origin': '원산지', 'product_name': '품명', 'size': '사이즈',
+            'packing': 'Packing', 'quantity': '오픈수량', 'unit_price': '단가', 'unit2': '단위2',
+            'open_amount': '오픈금액', 'lc_no': 'L/C No', 'bl_no': 'B/L No',
+            'etd': 'ETD', 'expected_date': 'ETA', 'arrival_date': '실입고일', 'warehouse': '창고',
+            'doc_acceptance': '서류인수일', 'maturity_date': '만기일', 'payment_date': '결제일',
+            'status': '상태', 'note': '비고'
         }
         
+        # 존재하는 컬럼만 선택
+        avail_cols = [c for c in cols_map.keys() if c in df_ledger.columns]
+        
+        # 데이터프레임 가공
+        display_df = df_ledger[avail_cols].rename(columns=cols_map)
+        
+        # CK번호 기준 정렬
+        display_df = display_df.sort_values(by='CK관리번호', ascending=False)
+        
         st.dataframe(
-            df[display_cols].rename(columns=col_map),
-            use_container_width=True,
-            hide_index=True,
-            height=600
+            display_df, 
+            use_container_width=True, 
+            height=700,
+            hide_index=True
         )
-    else:
-        st.info("데이터가 없습니다.")
 
-# --- TAB 2: 수입 상세 관리 (입력/수정) ---
-with tab_detail:
+# --- TAB 3: 등록 및 관리 ---
+with tab_manage:
     col_list, col_form = st.columns([1, 2])
     
     # [좌측] 리스트 및 선택
@@ -539,28 +472,23 @@ with tab_detail:
         
         with sub_t1:
             st.subheader("등록 건 목록")
-            df_list = get_full_schedule_data('ALL') # 전체 목록 불러오기
+            df_list = get_full_schedule_data('ALL')
             
-            # 검색 기능
-            search_txt = st.text_input("🔍 검색 (CK, 품명, B/L 등)", key="list_search")
+            search_txt = st.text_input("🔍 검색 (CK, 품명 등)", key="list_search")
             if not df_list.empty and search_txt:
                 mask = df_list.apply(lambda x: x.astype(str).str.contains(search_txt, case=False).any(), axis=1)
                 df_list = df_list[mask]
             
-            # 신규 등록 버튼
             if st.button("➕ 신규 등록 (빈 양식)", type="primary", use_container_width=True):
                 st.session_state['edit_mode'] = 'new'
                 st.session_state['selected_data'] = None
                 st.rerun()
                 
             st.markdown("---")
-            
             if not df_list.empty:
                 for idx, row in df_list.iterrows():
-                    # 카드 형태로 표시
                     label = f"**[{row['ck_code'] or 'NO-CK'}]** {row['product_name']}"
-                    sub = f"{row['supplier'] or '미지정'} | ETA: {row['expected_date']} | {row['status']}"
-                    
+                    sub = f"{row['supplier'] or '-'} | ETA: {row['expected_date']} | {row['status']}"
                     with st.container(border=True):
                         st.markdown(label)
                         st.caption(sub)
@@ -568,8 +496,7 @@ with tab_detail:
                             st.session_state['edit_mode'] = 'edit'
                             st.session_state['selected_data'] = row.to_dict()
                             st.rerun()
-            else:
-                st.info("데이터가 없습니다.")
+            else: st.info("데이터가 없습니다.")
         
         with sub_t2:
             st.subheader("엑셀 파일 업로드")
@@ -578,7 +505,6 @@ with tab_detail:
             if up_file:
                 if st.button("분석 및 등록 시작", use_container_width=True):
                     try:
-                        # CSV 파일 읽기
                         df_up = pd.read_csv(up_file)
                         valid_rows, err_list = parse_import_full_excel(df_up)
                         
@@ -598,8 +524,7 @@ with tab_detail:
                             st.toast(f"{cnt}건 일괄 등록 완료!")
                             time.sleep(1)
                             st.rerun()
-                    except Exception as e:
-                        st.error(f"오류 발생: {e}")
+                    except Exception as e: st.error(f"오류 발생: {e}")
 
     # [우측] 상세 입력 폼
     with col_form:
@@ -613,26 +538,20 @@ with tab_detail:
             st.info("좌측 목록에서 항목을 선택해주세요.")
         else:
             with st.form("detail_form"):
-                # 1. 기본 식별 정보
                 st.markdown("<div class='form-header'>기본 식별 정보</div>", unsafe_allow_html=True)
                 c1, c2, c3, c4 = st.columns(4)
                 ck_code = c1.text_input("CK 관리번호", value=data.get('ck_code', ''))
                 global_code = c2.text_input("글로벌 번호", value=data.get('global_code', ''))
                 doojin_code = c3.text_input("두진 번호", value=data.get('doojin_code', ''))
                 
-                # 품목 선택 (DB 연동)
                 p_df = get_products_df()
                 p_opts = {row['ID']: f"[{row['카테고리']}] {row['품목명']} ({row['품목코드']})" for _, row in p_df.iterrows()}
                 def_pid = data.get('product_id')
                 if def_pid not in p_opts: def_pid = None
-                
-                # index 찾기
                 opt_keys = list(p_opts.keys())
                 sel_idx = opt_keys.index(def_pid) if def_pid in opt_keys else 0
-                
                 sel_pid = c4.selectbox("품목 (필수)", options=opt_keys, format_func=lambda x: p_opts[x], index=sel_idx)
 
-                # 2. 계약 및 물품 정보
                 st.markdown("<div class='form-header'>계약 및 물품 정보</div>", unsafe_allow_html=True)
                 c1, c2, c3, c4 = st.columns(4)
                 agency = c1.text_input("대행사", value=data.get('agency', ''))
@@ -647,15 +566,11 @@ with tab_detail:
                 unit2 = c4.text_input("단가 단위", value=data.get('unit2', 'kg'))
 
                 c1, c2, c3, c4 = st.columns(4)
-                quantity = c1.number_input("오픈 수량", value=float(data.get('quantity') or 0.0)) # 기본 수량 컬럼 사용
+                quantity = c1.number_input("오픈 수량", value=float(data.get('quantity') or 0.0))
                 doc_qty = c2.number_input("서류 수량", value=float(data.get('doc_qty') or 0.0))
                 box_qty = c3.number_input("박스 수량", value=float(data.get('box_qty') or 0.0))
-                
-                # 금액 자동 계산 (단순 참고용)
-                est_amt = quantity * unit_price
-                open_amount = c4.number_input("오픈 금액", value=float(data.get('open_amount') or est_amt))
+                open_amount = c4.number_input("오픈 금액", value=float(data.get('open_amount') or 0.0))
 
-                # 3. L/C 및 서류 정보
                 st.markdown("<div class='form-header'>L/C 및 서류 정보</div>", unsafe_allow_html=True)
                 c1, c2, c3, c4 = st.columns(4)
                 tt_check = c1.text_input("T/T 여부", value=data.get('tt_check', ''))
@@ -669,11 +584,9 @@ with tab_detail:
                 lg_no = c3.text_input("L/G", value=data.get('lg_no', ''))
                 insurance = c4.text_input("보험", value=data.get('insurance', ''))
 
-                # 4. 일정 및 물류 정보
                 st.markdown("<div class='form-header'>일정 및 물류 정보</div>", unsafe_allow_html=True)
                 c1, c2, c3, c4 = st.columns(4)
                 etd = c1.date_input("ETD (출항)", value=data.get('etd'))
-                # expected_date를 ETA로 사용
                 eta = c2.date_input("ETA (입항/예정일)", value=data.get('expected_date') or get_kst_today())
                 arrival_date = c3.date_input("실 입고일", value=data.get('arrival_date'))
                 customs_broker_date = c4.date_input("관세사 전달일", value=data.get('customs_broker_date'))
@@ -683,7 +596,6 @@ with tab_detail:
                 destination = c2.text_input("착지", value=data.get('destination', ''))
                 actual_in_qty = c3.number_input("실 입고 수량", value=float(data.get('actual_in_qty') or 0.0))
 
-                # 5. 결제 정보
                 st.markdown("<div class='form-header'>결제 정보</div>", unsafe_allow_html=True)
                 c1, c2, c3, c4 = st.columns(4)
                 doc_acceptance = c1.date_input("서류 인수일", value=data.get('doc_acceptance'))
@@ -691,12 +603,10 @@ with tab_detail:
                 payment_date = c3.date_input("결제일", value=data.get('payment_date'))
                 payment_amount = c4.number_input("결제 금액", value=float(data.get('payment_amount') or 0.0))
 
-                # 비고 및 상태
                 st.markdown("<div class='form-header'>기타</div>", unsafe_allow_html=True)
                 note = st.text_area("비고", value=data.get('note', ''))
                 status = st.selectbox("진행 상태", ["PENDING", "ARRIVED", "CANCELED"], index=["PENDING", "ARRIVED", "CANCELED"].index(data.get('status', 'PENDING')))
 
-                # 저장 버튼
                 c_submit, c_del = st.columns([4, 1])
                 with c_submit:
                     if st.form_submit_button("💾 정보 저장", type="primary", use_container_width=True):
@@ -714,16 +624,13 @@ with tab_detail:
                             'doc_acceptance': doc_acceptance, 'maturity_date': maturity_date, 'payment_date': payment_date,
                             'payment_amount': payment_amount, 'note': note, 'status': status
                         }
-                        
                         sid = data.get('id') if edit_mode == 'edit' else None
                         succ, msg = save_full_schedule(save_data, sid)
-                        
                         if succ:
                             st.success(msg)
                             time.sleep(1)
                             st.rerun()
-                        else:
-                            st.error(f"저장 실패: {msg}")
+                        else: st.error(f"저장 실패: {msg}")
                 
                 with c_del:
                     if edit_mode == 'edit':
@@ -733,13 +640,10 @@ with tab_detail:
                             st.session_state['selected_data'] = None
                             st.rerun()
 
-# --- TAB 3: 품목 관리 (DB) ---
+# --- TAB 4: 품목 관리 (DB) ---
 with tab_product:
     st.markdown("### 📦 시스템 품목 관리")
-    
     col_p1, col_p2 = st.columns([1, 2])
-    
-    # 신규 등록
     with col_p1:
         st.markdown("#### 신규 품목 등록")
         with st.form("new_prod_form"):
@@ -756,14 +660,11 @@ with tab_product:
                         time.sleep(1)
                         st.rerun()
                     else: st.error(msg)
-                else:
-                    st.warning("코드와 품목명은 필수입니다.")
+                else: st.warning("코드와 품목명은 필수입니다.")
     
-    # 조회
     with col_p2:
         st.markdown("#### 등록된 품목 리스트")
         curr_prods = get_products_df()
         if not curr_prods.empty:
             st.dataframe(curr_prods, use_container_width=True, hide_index=True)
-        else:
-            st.info("등록된 품목이 없습니다.")
+        else: st.info("등록된 품목이 없습니다.")
