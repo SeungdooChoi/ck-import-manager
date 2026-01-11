@@ -167,9 +167,27 @@ def save_full_schedule(data, sid=None):
                 'payment_date', 'payment_amount', 'exchange_rate', 'balance', 'avg_exchange_rate'
             ]
             
-            # 파라미터 딕셔너리 구성 (None 값 처리)
-            params = {k: (v if v is not None and v != '' else None) for k, v in data.items()}
-            
+            # 파라미터 딕셔너리 구성 (None 값 처리 및 기본값 설정)
+            params = {}
+            for k in cols:
+                val = data.get(k)
+                # 숫자형 컬럼 리스트
+                numeric_cols = ['quantity', 'unit_price', 'open_qty', 'doc_qty', 'box_qty', 'open_amount', 'doc_amount', 
+                                'actual_in_qty', 'acceptance_rate', 'acceptance_fee', 'discount_fee', 'payment_amount', 
+                                'exchange_rate', 'balance', 'avg_exchange_rate']
+                
+                if k in numeric_cols:
+                    if val is None or val == '':
+                        params[k] = 0  # 숫자형 컬럼에 값이 없으면 0으로 저장
+                    else:
+                        params[k] = val
+                else:
+                    # 문자열/날짜 컬럼
+                    if val is None or val == '':
+                        params[k] = None # DB NULL 처리를 위해 None
+                    else:
+                        params[k] = val
+
             if sid:
                 # UPDATE
                 set_clause = ", ".join([f"{col} = :{col}" for col in cols])
@@ -382,7 +400,8 @@ def parse_import_full_excel(df):
                 'size': str(row.get(col_map['size'], '')).strip(),
                 'packing': str(row.get(col_map['packing'], '')).strip(),
                 'open_qty': safe_float_parse(row.get(col_map['open_qty'])),
-                'quantity': safe_float_parse(row.get(col_map['open_qty'])), # open_qty를 기본 수량으로
+                # quantity는 open_qty를 기본값으로 사용
+                'quantity': safe_float_parse(row.get(col_map['open_qty'])),
                 'doc_qty': safe_float_parse(row.get(col_map['doc_qty'])),
                 'box_qty': safe_float_parse(row.get(col_map['box_qty'])),
                 'unit2': str(row.get(col_map['unit2'], '')).strip(),
