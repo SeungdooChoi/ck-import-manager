@@ -5,6 +5,7 @@ from datetime import datetime
 import time
 import pytz
 import re
+import io
 
 # ==========================================
 # 0. 기본 설정 및 스타일
@@ -203,10 +204,7 @@ def safe_float_parse(val):
     except: return 0.0
 
 def parse_import_full_excel(df):
-    """
-    '수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱
-    헤더를 찾아 컬럼 매핑 후 데이터 추출
-    """
+    """'수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱"""
     valid_data = []
     errors = []
     
@@ -214,23 +212,28 @@ def parse_import_full_excel(df):
     if p_df.empty: return [], ["시스템에 등록된 품목이 없습니다."]
     product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
-    # 1. 헤더 행 찾기 (스코어링 방식)
-    # 상위 20행을 검사하여 'CK', '품명', '수량', '단가' 등의 키워드가 가장 많이 포함된 행을 헤더로 간주
+    # 1. 헤더 행 찾기 (스코어링 방식 강화)
     keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
     max_score = 0
     header_row_idx = -1
     
-    # 데이터프레임이 비어있으면 리턴
     if df.empty: return [], ["파일 내용이 없습니다."]
 
+    # 상위 20행 검사
     for i in range(min(20, len(df))):
+        # 행의 모든 값을 하나의 문자열로 합침 (NaN 제외)
         row_vals = [str(x).strip() for x in df.iloc[i].values if pd.notna(x)]
         row_str = " ".join(row_vals)
+        
         score = 0
         for k in keywords:
             if k in row_str: score += 1
         
-        if score > max_score and score >= 2: # 최소 2개 이상 키워드 일치
+        # 'CK' 또는 '관리번호' 와 '품명' 이 동시에 있으면 가산점
+        if ('CK' in row_str or '관리번호' in row_str) and '품명' in row_str:
+            score += 5
+            
+        if score > max_score and score >= 2:
             max_score = score
             header_row_idx = i
             
@@ -238,7 +241,7 @@ def parse_import_full_excel(df):
 
     # 2. 헤더 설정
     df.columns = df.iloc[header_row_idx]
-    # 컬럼 이름 정제 (줄바꿈, 공백 제거)
+    # 컬럼 이름 정제: 줄바꿈, 공백 등 모든 공백 문자 제거
     df.columns = [str(c).replace('\n', '').replace('\r', '').replace(' ', '').strip() for c in df.columns]
     
     data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
@@ -247,69 +250,37 @@ def parse_import_full_excel(df):
     # 3. 컬럼 매핑 (공백 제거된 컬럼명 기준)
     def find_col(keywords):
         for c in cols:
+            # 컬럼명에서도 공백 제거 후 비교
             c_clean = str(c).upper().strip()
             for k in keywords:
-                # 키워드도 공백 제거 후 비교
                 k_clean = k.upper().replace(" ", "").replace("\n", "")
                 if k_clean in c_clean: return c
         return None
 
+    # 매핑 키워드도 공백 없이 검색하도록 수정
     col_map = {
-        'ck': find_col(['CK', '관리번호']), 
-        'global': find_col(['글로벌']), 
-        'doojin': find_col(['두진']),
-        'agency': find_col(['대행']), 
-        'agency_contract': find_col(['대행계약서']),
-        'supplier': find_col(['수출자', '수입자']), 
-        'origin': find_col(['원산지']), 
-        'name': find_col(['품명']),
-        'size': find_col(['사이즈']), 
-        'packing': find_col(['Packing']), 
-        'open_qty': find_col(['오픈수량']),
-        'unit': find_col(['단위']), 
-        'doc_qty': find_col(['서류수량']), 
-        'box_qty': find_col(['박스수량']),
-        'price': find_col(['단가']), # '단가(USD)' -> 공백제거로 '단가(USD)'
-        'open_amt': find_col(['오픈금액']), 
-        'doc_amt': find_col(['서류금액']),
-        'tt': find_col(['T/T']), 
-        'bank': find_col(['은행']), 
-        'usance': find_col(['Usance']), 
-        'at_sight': find_col(['AtSight']),
-        'open_date': find_col(['개설일']), 
-        'lc_no': find_col(['LCNo', 'L/C']), 
-        'inv_no': find_col(['Invoice']),
-        'bl_no': find_col(['BLNo', 'B/L']), 
-        'lg_no': find_col(['LG', 'L/G']), 
-        'insurance': find_col(['보험']),
-        'broker_date': find_col(['관세사']), 
-        'etd': find_col(['ETD']), 
-        'eta': find_col(['ETA']),
-        'arrival_date': find_col(['입고일']), 
-        'wh': find_col(['창고']), 
-        'real_in_qty': find_col(['실입고']),
-        'dest': find_col(['착지']), 
-        'note': find_col(['비고']), 
-        'doc_acc': find_col(['서류인수']),
-        'acc_rate': find_col(['인수수수료율']), 
-        'mat_date': find_col(['만기일']), 
-        'ext_date': find_col(['연장만기일']),
-        'acc_fee': find_col(['인수수수료']), # 율 제외됨 (find_col 순서 중요하지 않음, 키워드 정확도)
-        'dis_fee': find_col(['인수할인료']), 
-        'pay_date': find_col(['결제일']),
-        'pay_amt': find_col(['결제금액']), 
-        'ex_rate': find_col(['환율']), 
-        'balance': find_col(['잔액']), 
-        'avg_ex': find_col(['평균환율'])
+        'ck': find_col(['CK', '관리번호']), 'global': find_col(['글로벌']), 'doojin': find_col(['두진']),
+        'agency': find_col(['대행']), 'agency_contract': find_col(['대행계약서']),
+        'supplier': find_col(['수출자', '수입자']), 'origin': find_col(['원산지']), 'name': find_col(['품명']),
+        'size': find_col(['사이즈']), 'packing': find_col(['Packing']), 'open_qty': find_col(['오픈수량']),
+        'unit': find_col(['단위']), 'doc_qty': find_col(['서류수량']), 'box_qty': find_col(['박스수량']),
+        'price': find_col(['단가']), 'open_amt': find_col(['오픈금액']), 'doc_amt': find_col(['서류금액']),
+        'tt': find_col(['T/T']), 'bank': find_col(['은행']), 'usance': find_col(['Usance']), 'at_sight': find_col(['AtSight']),
+        'open_date': find_col(['개설일']), 'lc_no': find_col(['LCNo', 'L/C']), 'inv_no': find_col(['Invoice']),
+        'bl_no': find_col(['BLNo', 'B/L']), 'lg_no': find_col(['LG', 'L/G']), 'insurance': find_col(['보험']),
+        'broker_date': find_col(['관세사', '관세사발송일']), 'etd': find_col(['ETD']), 'eta': find_col(['ETA']),
+        'arrival_date': find_col(['입고일']), 'wh': find_col(['창고']), 'real_in_qty': find_col(['실입고', '실입고수량']),
+        'dest': find_col(['착지']), 'note': find_col(['비고']), 'doc_acc': find_col(['서류인수']),
+        'acc_rate': find_col(['인수수수료율']), 'mat_date': find_col(['만기일']), 'ext_date': find_col(['연장만기일']),
+        'acc_fee': find_col(['인수수수료']), 'dis_fee': find_col(['인수할인료']), 'pay_date': find_col(['결제일']),
+        'pay_amt': find_col(['결제금액']), 'ex_rate': find_col(['환율']), 'balance': find_col(['잔액']), 'avg_ex': find_col(['평균환율'])
     }
     
-    # 'agency' 재확인 (대행계약서와 혼동 방지)
     if col_map['agency'] and '계약서' in str(col_map['agency']):
-        col_map['agency'] = None # 초기화 후 다시 찾기 시도하거나 무시
+        col_map['agency'] = None
         for c in cols:
             if '대행' in str(c) and '계약서' not in str(c): col_map['agency'] = c; break
 
-    # unit2 (단위2) 처리
     try:
         if col_map['price']:
             idx = cols.index(col_map['price'])
@@ -317,9 +288,7 @@ def parse_import_full_excel(df):
         else: col_map['unit2'] = None
     except: col_map['unit2'] = None
 
-    # 데이터 추출
     for idx, row in data_df.iterrows():
-        # 품명 필수
         if not col_map['name']: continue
         name_val = str(row.get(col_map['name'], '')).strip()
         if not name_val or name_val.lower() == 'nan': continue
@@ -334,7 +303,6 @@ def parse_import_full_excel(df):
             continue
             
         try:
-            # 헬퍼 함수로 값 추출 간소화
             def get_val(key, parser=str):
                 col = col_map.get(key)
                 if col:
@@ -381,13 +349,11 @@ def parse_import_full_excel(df):
                 'avg_exchange_rate': get_val('avg_ex', safe_float_parse),
                 'status': 'PENDING'
             }
-            # unit 처리 (단위) - 매핑에서 누락되었을 수 있으므로 별도 처리
+            # unit 처리 (단위)
             data['unit'] = str(row.get(col_map.get('unit'), '')).strip() if col_map.get('unit') else ''
 
-            # NaN 문자열 처리
             for k, v in data.items():
                 if isinstance(v, str) and (v.lower() == 'nan' or v.lower() == 'nat'): data[k] = ''
-            
             valid_data.append(data)
         except Exception as e:
             errors.append(f"[행 {idx+header_row_idx+2}] 데이터 파싱 오류: {str(e)}")
@@ -411,12 +377,9 @@ with tab_status:
     if df.empty:
         st.info("등록된 수입 일정이 없습니다.")
     else:
-        # PENDING 상태인 것만 우선 필터링하거나 전체 보여주기 (여기선 전체 보여주되 정렬)
-        # 입항일(expected_date) 기준으로 그룹핑하여 보여주기
-        
-        # 날짜 포맷팅
+        # PENDING 상태인 것만 우선 필터링하거나 전체 보여주기
+        # 입항일(expected_date) 기준으로 그룹핑
         df['eta_str'] = pd.to_datetime(df['expected_date']).dt.strftime('%y/%m/%d')
-        
         grouped = df.groupby('eta_str', sort=False)
         
         # HTML 생성
@@ -437,8 +400,8 @@ with tab_status:
             <tbody>
         """
         
+        # 수정: groupby 순회 방식 변경 (name, group)
         for date_str, group in grouped:
-            # 날짜 헤더 (그룹)
             html_content += f"""
             <tr style="background-color:#e7f5ff; border-top:1px solid #dee2e6; border-bottom:1px solid #dee2e6;">
                 <td colspan="8" style="padding:6px; font-weight:bold; text-align:left; padding-left:15px;">
@@ -483,14 +446,13 @@ with tab_ledger:
     
     db_filter = 'ALL'
     if view_filter == "진행중": db_filter = 'PENDING'
-    elif view_filter == "완료/취소": db_filter = 'ARRIVED' # 단순화 (취소 포함하려면 로직 수정 필요하나 일단 ARRIVED로)
+    elif view_filter == "완료/취소": db_filter = 'ARRIVED'
     
     df_ledger = get_full_schedule_data(db_filter)
     
     if df_ledger.empty:
         st.info("데이터가 없습니다.")
     else:
-        # 표시할 컬럼 정의 및 한글 매핑
         cols_map = {
             'ck_code': 'CK관리번호', 'global_code': '글로벌', 'doojin_code': '두진',
             'supplier': '수출자', 'origin': '원산지', 'product_name': '품명', 'size': '사이즈',
@@ -501,13 +463,8 @@ with tab_ledger:
             'status': '상태', 'note': '비고'
         }
         
-        # 존재하는 컬럼만 선택
         avail_cols = [c for c in cols_map.keys() if c in df_ledger.columns]
-        
-        # 데이터프레임 가공
         display_df = df_ledger[avail_cols].rename(columns=cols_map)
-        
-        # CK번호 기준 정렬
         display_df = display_df.sort_values(by='CK관리번호', ascending=False)
         
         st.dataframe(
@@ -521,7 +478,6 @@ with tab_ledger:
 with tab_manage:
     col_list, col_form = st.columns([1, 2])
     
-    # [좌측] 리스트 및 선택
     with col_list:
         sub_t1, sub_t2 = st.tabs(["목록 선택", "엑셀 일괄 등록"])
         
@@ -555,18 +511,36 @@ with tab_manage:
         
         with sub_t2:
             st.subheader("엑셀 파일 업로드")
-            st.caption("※ '수입' 탭 양식의 CSV 파일을 업로드하세요. '품명'이 시스템에 등록되어 있어야 합니다.")
+            st.markdown("""
+            **💡 업로드 가이드**
+            1. 아래 양식 다운로드 버튼을 눌러 템플릿을 받으세요.
+            2. 템플릿의 **헤더(첫 줄)를 유지**한 채 데이터를 입력하세요.
+            3. **품명**은 시스템에 등록된 것과 정확히 일치해야 합니다.
+            """)
+            
+            # 양식 다운로드 (간단한 CSV 생성)
+            sample_data = {
+                "CK": ["CK-SAMPLE"], "글로벌": [], "두진": [], "대행": [], "대행계약서": [], "수출자": ["Supplier A"],
+                "원산지": ["Country A"], "품명": ["Sample Product"], "사이즈": ["Size A"], "Packing": [], "오픈수량": [100],
+                "단위": ["BOX"], "서류수량": [], "박스수량": [], "단가": [10.5], "단위2": ["KG"], "오픈금액": [], "서류금액": [],
+                "T/T": [], "은행": [], "Usance": [], "At Sight": [], "개설일": [], "L/C No": [], "Invoice": [], "B/L": [],
+                "L/G": [], "보험": [], "관세사": [], "ETD": [], "ETA": ["2025-01-01"], "입고일": [], "창고": [], "실입고": [],
+                "착지": [], "비고": [], "서류인수": [], "인수수수료율": [], "만기일": [], "연장만기일": [], "인수수수료": [],
+                "인수할인료": [], "결제일": [], "결제금액": [], "환율": [], "잔액": [], "평균환율": []
+            }
+            sample_df = pd.DataFrame(sample_data)
+            csv_buffer = io.BytesIO()
+            sample_df.to_csv(csv_buffer, index=False, encoding='cp949')
+            st.download_button("📥 등록 양식 다운로드 (CSV)", csv_buffer.getvalue(), "import_template.csv", "text/csv")
+
             up_file = st.file_uploader("파일 선택", type=['csv', 'xlsx'])
             if up_file:
                 if st.button("분석 및 등록 시작", use_container_width=True):
                     try:
-                        # 파일 포맷 및 인코딩 처리
                         if up_file.name.endswith('.csv'):
                             try:
-                                # utf-8 시도
                                 df_up = pd.read_csv(up_file)
                             except:
-                                # 실패 시 cp949 시도 (한글 윈도우)
                                 up_file.seek(0)
                                 df_up = pd.read_csv(up_file, encoding='cp949')
                         else:
@@ -590,8 +564,7 @@ with tab_manage:
                             st.toast(f"{cnt}건 일괄 등록 완료!")
                             time.sleep(1)
                             st.rerun()
-                    except Exception as e:
-                        st.error(f"오류 발생: {e}")
+                    except Exception as e: st.error(f"오류 발생: {e}")
 
     # [우측] 상세 입력 폼
     with col_form:
