@@ -185,16 +185,19 @@ def save_full_schedule(data, sid=None):
                 params['status'] = 'PENDING'
 
             if sid:
+                # UPDATE
+                # JSON 컬럼은 ::jsonb 캐스팅 필요
                 set_clause = ", ".join([f"{col} = :{col}::jsonb" if col in json_cols else f"{col} = :{col}" for col in cols])
                 sql = f"UPDATE import_schedules SET {set_clause} WHERE id = :id"
                 params['id'] = sid
                 s.execute(text(sql), params)
                 msg = "수정 완료"
             else:
+                # INSERT
                 col_str = ", ".join(cols)
+                # JSON 컬럼은 ::jsonb 캐스팅 필요
                 val_str = ", ".join([f":{col}::jsonb" if col in json_cols else f":{col}" for col in cols])
                 sql = f"INSERT INTO import_schedules ({col_str}) VALUES ({val_str})"
-                # status 기본값 설정 로직은 위에서 처리됨
                 s.execute(text(sql), params)
                 msg = "등록 완료"
                 
