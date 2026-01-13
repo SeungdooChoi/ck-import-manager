@@ -120,15 +120,16 @@ def register_new_product(code, name, cat, unit):
 def get_full_schedule_data(status_filter='ALL'):
     """모든 상세 정보를 포함한 데이터 조회"""
     with conn.session as s:
+        # 모든 컬럼 선택 (LEFT JOIN으로 변경하여 제품 정보 없어도 조회 가능하도록)
         base_sql = """
             SELECT s.*, p.product_name, p.product_code as db_prod_code, p.unit as p_unit
             FROM import_schedules s
-            JOIN products p ON s.product_id = p.product_id
+            LEFT JOIN products p ON s.product_id = p.product_id
         """
         if status_filter != 'ALL':
             base_sql += f" WHERE s.status = '{status_filter}'"
         
-        base_sql += " ORDER BY s.expected_date ASC, s.ck_code ASC"
+        base_sql += " ORDER BY s.expected_date ASC, s.id DESC"
         
         df = pd.DataFrame(s.execute(text(base_sql)).fetchall())
         return df
@@ -243,7 +244,6 @@ def parse_import_full_excel(df):
     product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
     # 1. 헤더 행 찾기 (스코어링 방식)
-    # Check current columns first (if read_csv picked up header correctly)
     keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
     
     col_str = " ".join([str(c).strip() for c in df.columns])
@@ -258,7 +258,6 @@ def parse_import_full_excel(df):
     if score_cols >= 2 and ('CK' in col_str or '관리번호' in col_str) and '품명' in col_str:
         data_df = df
     else:
-        # 데이터프레임이 비어있으면 리턴
         if df.empty: return [], ["파일 내용이 없습니다."]
 
         max_score = 0
@@ -274,7 +273,6 @@ def parse_import_full_excel(df):
                 header_row_idx = i
                 
         if header_row_idx != -1:
-            # 헤더 설정
             df.columns = df.iloc[header_row_idx]
             data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
         else:
@@ -306,9 +304,9 @@ def parse_import_full_excel(df):
         'broker_date': find_col(['관세사', '관세사발송일']), 'etd': find_col(['ETD']), 'eta': find_col(['ETA']),
         'arrival_date': find_col(['입고일']), 'wh': find_col(['창고']), 'real_in_qty': find_col(['실입고', '실입고수량']),
         'dest': find_col(['착지']), 'note': find_col(['비고']), 'doc_acc': find_col(['서류인수']),
-        'acc_rate': find_col(['인수수수료율', '인수 수수료율']), 'mat_date': find_col(['만기일']), 'ext_date': find_col(['연장만기일']),
-        'acc_fee': find_col(['인수수수료', '인수 수수료']), 'dis_fee': find_col(['인수할인료']), 'pay_date': find_col(['결제일']),
-        'pay_amt': find_col(['결제금액', '결제 금액']), 'ex_rate': find_col(['환율']), 'balance': find_col(['잔액']), 'avg_ex': find_col(['평균환율'])
+        'acc_rate': find_col(['인수수수료율']), 'mat_date': find_col(['만기일']), 'ext_date': find_col(['연장만기일']),
+        'acc_fee': find_col(['인수수수료']), 'dis_fee': find_col(['인수할인료']), 'pay_date': find_col(['결제일']),
+        'pay_amt': find_col(['결제금액']), 'ex_rate': find_col(['환율']), 'balance': find_col(['잔액']), 'avg_ex': find_col(['평균환율'])
     }
     
     if col_map['agency'] and '계약서' in str(col_map['agency']):
