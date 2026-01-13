@@ -248,6 +248,7 @@ def parse_import_full_excel(df):
     product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
     # 1. 헤더 행 찾기 (스코어링 방식)
+    # Check current columns first (if read_csv picked up header correctly)
     keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
     
     col_str = " ".join([str(c).strip() for c in df.columns])
@@ -262,6 +263,7 @@ def parse_import_full_excel(df):
     if score_cols >= 2 and ('CK' in col_str or '관리번호' in col_str) and '품명' in col_str:
         data_df = df
     else:
+        # 데이터프레임이 비어있으면 리턴
         if df.empty: return [], ["파일 내용이 없습니다."]
 
         max_score = 0
