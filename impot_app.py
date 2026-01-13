@@ -216,6 +216,7 @@ def safe_date_parse(val):
     try:
         if isinstance(val, datetime): return val.strftime('%Y-%m-%d')
         s_val = str(val).strip()
+        # 다양한 날짜 형식 지원
         if re.match(r'^\d{2}/\d{2}/\d{2}$', s_val): # 25/01/01
             dt = datetime.strptime(s_val, "%y/%m/%d")
             if dt.year < 2000: dt = dt.replace(year=dt.year+2000)
@@ -244,6 +245,7 @@ def parse_import_full_excel(df):
     product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
     # 1. 헤더 행 찾기 (스코어링 방식)
+    # Check current columns first (if read_csv picked up header correctly)
     keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
     
     col_str = " ".join([str(c).strip() for c in df.columns])
@@ -258,6 +260,7 @@ def parse_import_full_excel(df):
     if score_cols >= 2 and ('CK' in col_str or '관리번호' in col_str) and '품명' in col_str:
         data_df = df
     else:
+        # 데이터프레임이 비어있으면 리턴
         if df.empty: return [], ["파일 내용이 없습니다."]
 
         max_score = 0
@@ -304,9 +307,9 @@ def parse_import_full_excel(df):
         'broker_date': find_col(['관세사', '관세사발송일']), 'etd': find_col(['ETD']), 'eta': find_col(['ETA']),
         'arrival_date': find_col(['입고일']), 'wh': find_col(['창고']), 'real_in_qty': find_col(['실입고', '실입고수량']),
         'dest': find_col(['착지']), 'note': find_col(['비고']), 'doc_acc': find_col(['서류인수']),
-        'acc_rate': find_col(['인수수수료율']), 'mat_date': find_col(['만기일']), 'ext_date': find_col(['연장만기일']),
-        'acc_fee': find_col(['인수수수료']), 'dis_fee': find_col(['인수할인료']), 'pay_date': find_col(['결제일']),
-        'pay_amt': find_col(['결제금액']), 'ex_rate': find_col(['환율']), 'balance': find_col(['잔액']), 'avg_ex': find_col(['평균환율'])
+        'acc_rate': find_col(['인수수수료율', '인수 수수료율']), 'mat_date': find_col(['만기일']), 'ext_date': find_col(['연장만기일']),
+        'acc_fee': find_col(['인수수수료', '인수 수수료']), 'dis_fee': find_col(['인수할인료', '인수 할인료']), 'pay_date': find_col(['결제일']),
+        'pay_amt': find_col(['결제금액', '결제 금액']), 'ex_rate': find_col(['환율']), 'balance': find_col(['잔액']), 'avg_ex': find_col(['평균환율'])
     }
     
     if col_map['agency'] and '계약서' in str(col_map['agency']):
