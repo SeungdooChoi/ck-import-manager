@@ -616,22 +616,38 @@ with tab_manage:
                             
                         valid_rows, err_list = parse_import_full_excel(df_up)
                         
-                        if err_list:
-                            st.error(f"{len(err_list)}건의 에러가 있습니다.")
-                            with st.expander("에러 상세 보기"):
-                                for e in err_list: st.write(f"- {e}")
-                        
                         if valid_rows:
                             st.success(f"{len(valid_rows)}건의 유효 데이터를 찾았습니다.")
                             prog = st.progress(0)
                             cnt = 0
+                            fail_reasons = [] # 실패 사유 저장용 리스트
+                            
                             for i, d in enumerate(valid_rows):
-                                ok, _ = save_full_schedule(d)
-                                if ok: cnt += 1
+                                ok, msg = save_full_schedule(d) # msg 변수 활용
+                                if ok: 
+                                    cnt += 1
+                                else:
+                                    fail_reasons.append(f"행 {i+1}: {msg}")
                                 prog.progress((i+1)/len(valid_rows))
-                            st.toast(f"{cnt}건 일괄 등록 완료!")
+                            
+                            if cnt > 0:
+                                st.toast(f"{cnt}건 일괄 등록 완료!")
+                                st.success(f"총 {cnt}건이 성공적으로 등록되었습니다.")
+                            
+                            if fail_reasons:
+                                st.error(f"{len(fail_reasons)}건이 등록에 실패했습니다.")
+                                with st.expander("실패 상세 사유 보기"):
+                                    for reason in fail_reasons:
+                                        st.write(reason)
+                                        
                             time.sleep(1)
-                            st.rerun()
+                            # st.rerun() # 에러 메시지를 보기 위해 rerun은 조건부로 하거나 잠시 대기
+                        
+                        if err_list:
+                            st.error(f"{len(err_list)}건의 에러가 있습니다.")
+                            with st.expander("에러 상세 보기"):
+                                for e in err_list: st.write(f"- {e}")
+                            
                     except Exception as e:
                         st.error(f"오류 발생: {e}")
 
