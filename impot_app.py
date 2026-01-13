@@ -178,6 +178,10 @@ def save_full_schedule(data, sid=None):
                         params[k] = None
                     else:
                         params[k] = val
+            
+            # status 값 강제 설정 (값이 없으면 PENDING)
+            if not params.get('status'):
+                params['status'] = 'PENDING'
 
             if sid:
                 set_clause = ", ".join([f"{col} = :{col}::jsonb" if col in json_cols else f"{col} = :{col}" for col in cols])
@@ -189,8 +193,7 @@ def save_full_schedule(data, sid=None):
                 col_str = ", ".join(cols)
                 val_str = ", ".join([f":{col}::jsonb" if col in json_cols else f":{col}" for col in cols])
                 sql = f"INSERT INTO import_schedules ({col_str}) VALUES ({val_str})"
-                if 'status' not in params or not params['status']:
-                    params['status'] = 'PENDING'
+                # status 기본값 설정 로직은 위에서 처리됨
                 s.execute(text(sql), params)
                 msg = "등록 완료"
                 
