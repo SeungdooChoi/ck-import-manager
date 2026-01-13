@@ -303,9 +303,9 @@ def parse_import_full_excel(df):
         'broker_date': find_col(['관세사', '관세사발송일']), 'etd': find_col(['ETD']), 'eta': find_col(['ETA']),
         'arrival_date': find_col(['입고일']), 'wh': find_col(['창고']), 'real_in_qty': find_col(['실입고', '실입고수량']),
         'dest': find_col(['착지']), 'note': find_col(['비고']), 'doc_acc': find_col(['서류인수']),
-        'acc_rate': find_col(['인수수수료율']), 'mat_date': find_col(['만기일']), 'ext_date': find_col(['연장만기일']),
-        'acc_fee': find_col(['인수수수료']), 'dis_fee': find_col(['인수할인료']), 'pay_date': find_col(['결제일']),
-        'pay_amt': find_col(['결제금액']), 'ex_rate': find_col(['환율']), 'balance': find_col(['잔액']), 'avg_ex': find_col(['평균환율'])
+        'acc_rate': find_col(['인수수수료율', '인수 수수료율']), 'mat_date': find_col(['만기일']), 'ext_date': find_col(['연장만기일']),
+        'acc_fee': find_col(['인수수수료', '인수 수수료']), 'dis_fee': find_col(['인수할인료']), 'pay_date': find_col(['결제일']),
+        'pay_amt': find_col(['결제금액', '결제 금액']), 'ex_rate': find_col(['환율']), 'balance': find_col(['잔액']), 'avg_ex': find_col(['평균환율'])
     }
     
     if col_map['agency'] and '계약서' in str(col_map['agency']):
@@ -472,6 +472,9 @@ with tab_ledger:
     with col_l1:
         view_filter = st.selectbox("상태 필터", ["전체", "진행중", "완료/취소"])
     
+    # 검색 기능 추가
+    search_query = st.text_input("🔍 검색 (관리번호, 품명, 수출자)", placeholder="검색어 입력...")
+
     db_filter = 'ALL'
     if view_filter == "진행중": db_filter = 'PENDING'
     elif view_filter == "완료/취소": db_filter = 'ARRIVED'
@@ -481,6 +484,15 @@ with tab_ledger:
     if df_ledger.empty:
         st.info("데이터가 없습니다.")
     else:
+        # 검색 필터링 적용
+        if search_query:
+            query = search_query.lower()
+            df_ledger = df_ledger[
+                df_ledger['ck_code'].astype(str).str.lower().str.contains(query) |
+                df_ledger['product_name'].astype(str).str.lower().str.contains(query) |
+                df_ledger['supplier'].astype(str).str.lower().str.contains(query)
+            ]
+
         cols_map = {
             'ck_code': 'CK관리번호', 'global_code': '글로벌', 'doojin_code': '두진',
             'supplier': '수출자', 'origin': '원산지', 'product_name': '품명', 'size': '사이즈',
@@ -493,14 +505,17 @@ with tab_ledger:
         
         avail_cols = [c for c in cols_map.keys() if c in df_ledger.columns]
         display_df = df_ledger[avail_cols].rename(columns=cols_map)
-        display_df = display_df.sort_values(by='CK관리번호', ascending=False)
         
-        st.dataframe(
-            display_df, 
-            use_container_width=True, 
-            height=700,
-            hide_index=True
-        )
+        if not display_df.empty:
+            display_df = display_df.sort_values(by='CK관리번호', ascending=False)
+            st.dataframe(
+                display_df, 
+                use_container_width=True, 
+                height=700,
+                hide_index=True
+            )
+        else:
+            st.info("검색 결과가 없습니다.")
 
 # --- TAB 3: 등록 및 관리 ---
 with tab_manage:
