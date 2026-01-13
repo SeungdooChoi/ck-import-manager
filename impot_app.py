@@ -186,8 +186,9 @@ def save_full_schedule(data, sid=None):
 
             if sid:
                 # UPDATE
-                # JSON 컬럼은 ::jsonb 캐스팅 필요
-                set_clause = ", ".join([f"{col} = :{col}::jsonb" if col in json_cols else f"{col} = :{col}" for col in cols])
+                # SQLAlchemy text()에서 ::jsonb 문법 충돌 방지를 위해 캐스팅 제거 (DB 드라이버가 처리)
+                # 만약 캐스팅이 꼭 필요하다면 CAST(:param AS JSONB) 사용 권장
+                set_clause = ", ".join([f"{col} = :{col}" for col in cols])
                 sql = f"UPDATE import_schedules SET {set_clause} WHERE id = :id"
                 params['id'] = sid
                 s.execute(text(sql), params)
@@ -195,8 +196,8 @@ def save_full_schedule(data, sid=None):
             else:
                 # INSERT
                 col_str = ", ".join(cols)
-                # JSON 컬럼은 ::jsonb 캐스팅 필요
-                val_str = ", ".join([f":{col}::jsonb" if col in json_cols else f":{col}" for col in cols])
+                # ::jsonb 제거
+                val_str = ", ".join([f":{col}" for col in cols])
                 sql = f"INSERT INTO import_schedules ({col_str}) VALUES ({val_str})"
                 s.execute(text(sql), params)
                 msg = "등록 완료"
