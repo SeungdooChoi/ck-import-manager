@@ -188,7 +188,7 @@ def save_full_schedule(data, sid=None):
 
             if sid:
                 # UPDATE
-                # CAST(:param AS JSONB) 사용으로 문법 오류 해결
+                # [수정] JSON 컬럼 충돌 방지를 위해 ::jsonb 대신 CAST(... AS JSONB) 사용
                 set_clause_parts = []
                 for col in cols:
                     if col in json_cols:
@@ -243,15 +243,14 @@ def update_schedule_status(sid, new_status):
             sch = s.execute(text("SELECT * FROM import_schedules WHERE id = :sid"), {"sid": sid}).mappings().fetchone()
             if not sch: return False, "일정 정보를 찾을 수 없습니다."
 
-            # 입고일 결정 로직: 실입고일 > ETA > 오늘 (형식 변환 주의)
-            # sch['arrival_date']가 string으로 올 수도 있고 date 객체로 올 수도 있음
+            # 입고일 결정 로직
             def ensure_date_obj(d):
                 if isinstance(d, str):
                     try: return datetime.strptime(d, '%Y-%m-%d').date()
                     except: return get_kst_today()
                 return d
             
-            entry_date = ensure_date_obj(sch['arrival_date']) if sch['arrival_date'] else (ensure_date_obj(sch['expected_date']) if sch['expected_date'] else get_kst_today())
+            entry_date = ensure_date_obj(sch.get('arrival_date')) if sch.get('arrival_date') else (ensure_date_obj(sch.get('expected_date')) if sch.get('expected_date') else get_kst_today())
             lot_no = entry_date.strftime("%Y-%m-%d")
 
             # 2. ARRIVED 상태로 변경 시 -> stock_by_lot 테이블에 미통관 재고로 등록
@@ -261,18 +260,21 @@ def update_schedule_status(sid, new_status):
                 cat = prod[0] if prod else '기타'
                 unit = prod[1] if prod else 'Box'
                 
-                # 수량 결정: 실입고 > 오픈 > 기본
-                qty = 0
-                if sch['actual_in_qty'] and float(sch['actual_in_qty']) > 0: qty = float(sch['actual_in_qty'])
-                elif sch['open_qty'] and float(sch['open_qty']) > 0: qty = float(sch['open_qty'])
-                else: qty = float(sch['quantity']) if sch['quantity'] else 0
+                # 수량 결정
+                qty = 0.0
+                try:
+                    if sch.get('actual_in_qty') and float(sch['actual_in_qty']) > 0: qty = float(sch['actual_in_qty'])
+                    elif sch.get('open_qty') and float(sch['open_qty']) > 0: qty = float(sch['open_qty'])
+                    elif sch.get('quantity'): qty = float(sch['quantity'])
+                except: qty = 0.0
                 
                 if qty > 0:
-                    wh = sch['warehouse'] if sch['warehouse'] else '미정'
-                    note_text = f"수입도착({sch['ck_code'] or '-'}) {sch['note'] or ''}"
+                    wh = sch.get('warehouse') if sch.get('warehouse') else '미정'
+                    ck_code_val = sch.get('ck_code', '-') or '-'
+                    note_val = sch.get('note', '') or ''
+                    note_text = f"수입도착({ck_code_val}) {note_val}"
                     
-                    # 중복 체크 (제품, LOT, 수량, 미통관 상태)
-                    # 동일한 조건으로 이미 등록된 건이 있는지 확인하여 중복 생성 방지
+                    # 중복 체크
                     check = s.execute(text("""
                         SELECT stock_id FROM stock_by_lot 
                         WHERE product_id = :pid AND lot_number = :lot AND quantity = :qty AND is_cleared = FALSE
@@ -290,9 +292,9 @@ def update_schedule_status(sid, new_status):
                             "qty": qty,
                             "ed": entry_date,
                             "wh": wh,
-                            "man": sch['supplier'],
-                            "price": sch['unit_price'] or 0,
-                            "size": sch['size'],
+                            "man": sch.get('supplier', ''),
+                            "price": sch.get('unit_price', 0) or 0,
+                            "size": sch.get('size', ''),
                             "note": note_text,
                             "cat": cat,
                             "unit": unit
@@ -307,7 +309,8 @@ def update_schedule_status(sid, new_status):
             
             # 3. CANCELED/PENDING 복구 시 -> 해당 재고 삭제 시도
             elif new_status in ['CANCELED', 'PENDING']:
-                 note_pattern = f"수입도착({sch['ck_code'] or '-'})%"
+                 ck_code_val = sch.get('ck_code', '-') or '-'
+                 note_pattern = f"수입도착({ck_code_val})%"
                  s.execute(text("""
                     DELETE FROM stock_by_lot 
                     WHERE product_id = :pid AND lot_number = :lot AND note LIKE :note AND is_cleared = FALSE
@@ -354,17 +357,14 @@ def parse_import_full_excel(df):
     # 1. 헤더 행 찾기 (스코어링 방식 강화)
     keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
     
-    # 문자열 정제 헬퍼 (공백, 줄바꿈 제거)
     def clean_str(s):
         return str(s).replace('\n', '').replace('\r', '').replace(' ', '').upper().strip()
 
-    # 현재 컬럼명이 헤더인지 먼저 확인
     col_str = "".join([clean_str(c) for c in df.columns])
     score_cols = 0
     for k in keywords:
         if k in col_str: score_cols += 1
     
-    # 필수 키워드 (CK/관리번호 + 품명) 확인
     has_mandatory = ('CK' in col_str or '관리번호' in col_str) and '품명' in col_str
 
     data_df = pd.DataFrame()
@@ -395,20 +395,16 @@ def parse_import_full_excel(df):
         else:
             return [], ["헤더('CK', '품명' 등)를 찾을 수 없습니다. (상위 20행 검색 실패)"]
 
-    # 컬럼 이름 정제 (모든 공백/줄바꿈 제거)
     data_df.columns = [clean_str(c) for c in data_df.columns]
     cols = list(data_df.columns)
     
-    # 3. 컬럼 매핑 (공백 제거된 키워드 사용)
     def find_col(keywords):
         for c in cols:
-            # c는 이미 clean_str 처리됨
             for k in keywords:
                 k_clean = k.replace(" ", "").upper()
                 if k_clean in c: return c
         return None
 
-    # 키워드도 공백 없이 검색
     col_map = {
         'ck': find_col(['CK', '관리번호']), 'global': find_col(['글로벌']), 'doojin': find_col(['두진']),
         'agency': find_col(['대행']), 'agency_contract': find_col(['대행계약서']),
@@ -423,12 +419,10 @@ def parse_import_full_excel(df):
         'arrival_date': find_col(['입고일']), 'wh': find_col(['창고']), 'real_in_qty': find_col(['실입고']),
         'dest': find_col(['착지']), 'note': find_col(['비고']), 'doc_acc': find_col(['서류인수']),
         'acc_rate': find_col(['인수수수료율']), 'mat_date': find_col(['만기일']), 'ext_date': find_col(['연장만기일']),
-        'acc_fee': find_col(['인수수수료']), # 율 제외됨 (find_col 순서 중요하지 않음, 키워드 정확도)
-        'dis_fee': find_col(['인수할인료']), 'pay_date': find_col(['결제일']),
+        'acc_fee': find_col(['인수수수료']), 'dis_fee': find_col(['인수할인료']), 'pay_date': find_col(['결제일']),
         'pay_amt': find_col(['결제금액']), 'ex_rate': find_col(['환율']), 'balance': find_col(['잔액']), 'avg_ex': find_col(['평균환율'])
     }
     
-    # 'agency' 재확인
     if col_map['agency'] and '계약서' in str(col_map['agency']):
         col_map['agency'] = None
         for c in cols:
@@ -441,7 +435,6 @@ def parse_import_full_excel(df):
         else: col_map['unit2'] = None
     except: col_map['unit2'] = None
 
-    # 데이터 추출
     for idx, row in data_df.iterrows():
         if not col_map['name']: continue
         name_val = str(row.get(col_map['name'], '')).strip()
@@ -457,7 +450,6 @@ def parse_import_full_excel(df):
             continue
             
         try:
-            # 헬퍼 함수
             def get_val(key, parser=str):
                 col = col_map.get(key)
                 if col:
@@ -465,14 +457,12 @@ def parse_import_full_excel(df):
                     return parser(val)
                 return 0.0 if parser == safe_float_parse else (None if parser == safe_date_parse else '')
 
-            # 통관 정보 추출
             clearance_list = []
             for i in range(1, 11):
                 suffix = str(i) if i > 1 else ""
                 c_date_col = find_col([f"통관일자{suffix}"])
                 c_qty_col = find_col([f"통관수량{suffix}"])
                 c_rate_col = find_col([f"통관환율{suffix}"])
-                
                 if c_date_col or c_qty_col:
                     d_val = safe_date_parse(row.get(c_date_col)) if c_date_col else None
                     q_val = safe_float_parse(row.get(c_qty_col)) if c_qty_col else 0.0
@@ -480,13 +470,11 @@ def parse_import_full_excel(df):
                     if d_val or q_val > 0:
                         clearance_list.append({"date": d_val, "qty": q_val, "rate": r_val})
 
-            # 수입신고 정보 추출
             declaration_list = []
             for i in range(1, 11):
                 suffix = str(i) if i > 1 else ""
                 d_date_col = find_col([f"신고일{suffix}"])
                 d_no_col = find_col([f"신고번호{suffix}"])
-                
                 if d_date_col or d_no_col:
                     date_val = safe_date_parse(row.get(d_date_col)) if d_date_col else None
                     no_val = str(row.get(d_no_col, '')).strip() if d_no_col else ''
