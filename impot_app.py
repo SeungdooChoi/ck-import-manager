@@ -512,13 +512,21 @@ with tab_ledger:
                 df_ledger['supplier'].astype(str).str.lower().str.contains(query)
             ]
 
+        # 모든 상세 항목 표시를 위한 컬럼 매핑 (전체 컬럼 포함)
         cols_map = {
             'ck_code': 'CK관리번호', 'global_code': '글로벌', 'doojin_code': '두진',
+            'agency': '대행사', 'agency_contract': '대행계약서',
             'supplier': '수출자', 'origin': '원산지', 'product_name': '품명', 'size': '사이즈',
-            'packing': 'Packing', 'quantity': '오픈수량', 'unit_price': '단가', 'unit2': '단위2',
-            'open_amount': '오픈금액', 'lc_no': 'L/C No', 'bl_no': 'B/L No',
-            'etd': 'ETD', 'expected_date': 'ETA', 'arrival_date': '실입고일', 'warehouse': '창고',
-            'doc_acceptance': '서류인수일', 'maturity_date': '만기일', 'payment_date': '결제일',
+            'packing': 'Packing', 'quantity': '오픈수량', 'unit': '단위', 'doc_qty': '서류수량', 'box_qty': '박스수량',
+            'unit_price': '단가', 'unit2': '단위2',
+            'open_amount': '오픈금액', 'doc_amount': '서류금액',
+            'tt_check': 'T/T', 'bank': '은행', 'usance': 'Usance', 'at_sight': 'At Sight',
+            'open_date': '개설일', 'lc_no': 'L/C No', 'invoice_no': 'Invoice No', 'bl_no': 'B/L No', 'lg_no': 'L/G', 'insurance': '보험',
+            'customs_broker_date': '관세사전달', 'etd': 'ETD', 'expected_date': 'ETA', 
+            'arrival_date': '실입고일', 'warehouse': '창고', 'actual_in_qty': '실입고수량', 'destination': '착지',
+            'doc_acceptance': '서류인수일', 'acceptance_rate': '인수수수료율', 'maturity_date': '만기일', 'ext_maturity_date': '연장만기일',
+            'acceptance_fee': '인수수수료', 'discount_fee': '인수할인료', 'payment_date': '결제일',
+            'payment_amount': '결제금액', 'exchange_rate': '환율', 'balance': '잔액', 'avg_exchange_rate': '평균환율',
             'status': '상태', 'note': '비고'
         }
         
@@ -527,11 +535,14 @@ with tab_ledger:
         
         if not display_df.empty:
             display_df = display_df.sort_values(by='CK관리번호', ascending=False)
+            
+            # column_order를 사용하여 모든 컬럼 순서 고정 및 표시
             st.dataframe(
                 display_df, 
                 use_container_width=True, 
                 height=700,
-                hide_index=True
+                hide_index=True,
+                column_order=list(cols_map.values()) # 컬럼 순서 고정
             )
         else:
             st.info("검색 결과가 없습니다.")
