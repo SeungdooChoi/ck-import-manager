@@ -188,7 +188,7 @@ def save_full_schedule(data, sid=None):
 
             if sid:
                 # UPDATE
-                # [수정] JSON 컬럼 충돌 방지를 위해 ::jsonb 대신 CAST(... AS JSONB) 사용
+                # CAST(:param AS JSONB) 사용으로 문법 오류 해결
                 set_clause_parts = []
                 for col in cols:
                     if col in json_cols:
@@ -232,93 +232,112 @@ def update_schedule_status(sid, new_status):
     """
     일정 상태를 변경합니다.
     - ARRIVED 변경 시: stock_by_lot 테이블에 미통관 재고로 자동 등록합니다.
-    - CANCELED 변경 시: 만약 stock_by_lot에 등록된 재고가 있다면 삭제합니다.
+    - 필수 정보가 누락된 경우 상태 변경을 거부합니다.
     """
     try:
         with conn.session as s:
-            # 1. 상태 업데이트
-            s.execute(text("UPDATE import_schedules SET status = :st WHERE id = :sid"), {"st": new_status, "sid": sid})
-            
             # 일정 정보 조회
             sch = s.execute(text("SELECT * FROM import_schedules WHERE id = :sid"), {"sid": sid}).mappings().fetchone()
             if not sch: return False, "일정 정보를 찾을 수 없습니다."
-
-            # 입고일 결정 로직
-            def ensure_date_obj(d):
-                if isinstance(d, str):
-                    try: return datetime.strptime(d, '%Y-%m-%d').date()
-                    except: return get_kst_today()
-                return d
             
-            entry_date = ensure_date_obj(sch.get('arrival_date')) if sch.get('arrival_date') else (ensure_date_obj(sch.get('expected_date')) if sch.get('expected_date') else get_kst_today())
-            lot_no = entry_date.strftime("%Y-%m-%d")
-
-            # 2. ARRIVED 상태로 변경 시 -> stock_by_lot 테이블에 미통관 재고로 등록
+            # 1. ARRIVED 상태로 변경 시 -> 필수 정보 검증 및 재고 등록
             if new_status == 'ARRIVED':
-                # 품목 정보 조회
-                prod = s.execute(text("SELECT category, unit FROM products WHERE product_id = :pid"), {"pid": sch['product_id']}).fetchone()
-                cat = prod[0] if prod else '기타'
-                unit = prod[1] if prod else 'Box'
+                # 필수 정보 검증
+                missing_fields = []
                 
-                # 수량 결정
+                # 수량 확인
                 qty = 0.0
                 try:
                     if sch.get('actual_in_qty') and float(sch['actual_in_qty']) > 0: qty = float(sch['actual_in_qty'])
                     elif sch.get('open_qty') and float(sch['open_qty']) > 0: qty = float(sch['open_qty'])
                     elif sch.get('quantity'): qty = float(sch['quantity'])
-                except: qty = 0.0
+                except: pass
                 
-                if qty > 0:
-                    wh = sch.get('warehouse') if sch.get('warehouse') else '미정'
-                    ck_code_val = sch.get('ck_code', '-') or '-'
-                    note_val = sch.get('note', '') or ''
-                    note_text = f"수입도착({ck_code_val}) {note_val}"
+                if qty <= 0: missing_fields.append("수량(오픈수량 또는 실입고수량)")
+                
+                # 날짜 확인
+                entry_date = None
+                def ensure_date_obj(d):
+                    if isinstance(d, str):
+                        try: return datetime.strptime(d, '%Y-%m-%d').date()
+                        except: return None
+                    return d
+                
+                entry_date = ensure_date_obj(sch.get('arrival_date')) or ensure_date_obj(sch.get('expected_date'))
+                if not entry_date: missing_fields.append("입고일(실입고일 또는 입항일)")
+                
+                if missing_fields:
+                    return False, f"필수 정보 누락으로 입고 처리 불가: {', '.join(missing_fields)}"
+
+                # 품목 정보 조회
+                prod = s.execute(text("SELECT category, unit FROM products WHERE product_id = :pid"), {"pid": sch['product_id']}).fetchone()
+                cat = prod[0] if prod else '기타'
+                unit = prod[1] if prod else 'Box'
+                lot_no = entry_date.strftime("%Y-%m-%d")
+                
+                wh = sch.get('warehouse') if sch.get('warehouse') else '미정'
+                ck_code_val = sch.get('ck_code', '-') or '-'
+                note_val = sch.get('note', '') or ''
+                note_text = f"수입도착({ck_code_val}) {note_val}"
+                
+                # 중복 체크
+                check = s.execute(text("""
+                    SELECT stock_id FROM stock_by_lot 
+                    WHERE product_id = :pid AND lot_number = :lot AND quantity = :qty AND is_cleared = FALSE
+                """), {"pid": sch['product_id'], "lot": lot_no, "qty": qty}).fetchone()
+                
+                if not check:
+                    s.execute(text("""
+                        INSERT INTO stock_by_lot 
+                        (product_id, lot_number, quantity, entry_date, warehouse_loc, manufacturer, unit_price, size, note, category, unit, is_cleared)
+                        VALUES 
+                        (:pid, :lot, :qty, :ed, :wh, :man, :price, :size, :note, :cat, :unit, FALSE)
+                    """), {
+                        "pid": sch['product_id'],
+                        "lot": lot_no,
+                        "qty": qty,
+                        "ed": entry_date,
+                        "wh": wh,
+                        "man": sch.get('supplier', ''),
+                        "price": sch.get('unit_price', 0) or 0,
+                        "size": sch.get('size', ''),
+                        "note": note_text,
+                        "cat": cat,
+                        "unit": unit
+                    })
                     
-                    # 중복 체크
-                    check = s.execute(text("""
-                        SELECT stock_id FROM stock_by_lot 
-                        WHERE product_id = :pid AND lot_number = :lot AND quantity = :qty AND is_cleared = FALSE
-                    """), {"pid": sch['product_id'], "lot": lot_no, "qty": qty}).fetchone()
-                    
-                    if not check:
-                        s.execute(text("""
-                            INSERT INTO stock_by_lot 
-                            (product_id, lot_number, quantity, entry_date, warehouse_loc, manufacturer, unit_price, size, note, category, unit, is_cleared)
-                            VALUES 
-                            (:pid, :lot, :qty, :ed, :wh, :man, :price, :size, :note, :cat, :unit, FALSE)
-                        """), {
-                            "pid": sch['product_id'],
-                            "lot": lot_no,
-                            "qty": qty,
-                            "ed": entry_date,
-                            "wh": wh,
-                            "man": sch.get('supplier', ''),
-                            "price": sch.get('unit_price', 0) or 0,
-                            "size": sch.get('size', ''),
-                            "note": note_text,
-                            "cat": cat,
-                            "unit": unit
-                        })
-                        
-                        # 이력 남기기
-                        s.execute(text("""
-                            INSERT INTO transactions 
-                            (trans_type, product_id, lot_number, quantity, manager_id, remarks, status, trans_date) 
-                            VALUES ('IN', :pid, :lot, :qty, 0, '수입도착(미통관)', 'VALID', NOW())
-                        """), {"pid": sch['product_id'], "lot": lot_no, "qty": qty})
+                    # 이력 남기기
+                    s.execute(text("""
+                        INSERT INTO transactions 
+                        (trans_type, product_id, lot_number, quantity, manager_id, remarks, status, trans_date) 
+                        VALUES ('IN', :pid, :lot, :qty, 0, '수입도착(미통관)', 'VALID', NOW())
+                    """), {"pid": sch['product_id'], "lot": lot_no, "qty": qty})
             
-            # 3. CANCELED/PENDING 복구 시 -> 해당 재고 삭제 시도
+            # 2. CANCELED/PENDING 복구 시 -> 해당 재고 삭제 시도
             elif new_status in ['CANCELED', 'PENDING']:
+                 # 날짜 파싱 재시도 (삭제 쿼리용)
+                 def ensure_date_obj_del(d):
+                    if isinstance(d, str):
+                        try: return datetime.strptime(d, '%Y-%m-%d').date()
+                        except: return get_kst_today() # 임시
+                    return d
+                 
+                 e_date = ensure_date_obj_del(sch.get('arrival_date')) or ensure_date_obj_del(sch.get('expected_date')) or get_kst_today()
+                 l_no = e_date.strftime("%Y-%m-%d")
+                 
                  ck_code_val = sch.get('ck_code', '-') or '-'
                  note_pattern = f"수입도착({ck_code_val})%"
                  s.execute(text("""
                     DELETE FROM stock_by_lot 
                     WHERE product_id = :pid AND lot_number = :lot AND note LIKE :note AND is_cleared = FALSE
-                 """), {"pid": sch['product_id'], "lot": lot_no, "note": note_pattern})
+                 """), {"pid": sch['product_id'], "lot": l_no, "note": note_pattern})
 
+            # 3. 상태 업데이트 (가장 마지막에 수행)
+            s.execute(text("UPDATE import_schedules SET status = :st WHERE id = :sid"), {"st": new_status, "sid": sid})
             s.commit()
+            
         return True, f"상태가 '{new_status}'로 변경되었습니다."
-    except Exception as e: return False, str(e)
+    except Exception as e: return False, f"오류 발생: {str(e)}"
 
 # --- 유틸리티 함수 ---
 def safe_date_parse(val):
