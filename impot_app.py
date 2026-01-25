@@ -231,7 +231,8 @@ def delete_schedule(sid):
 def update_schedule_status(sid, new_status):
     """
     일정 상태를 변경합니다.
-    - ARRIVED 변경 시: 필수 정보 확인 후 stock_by_lot 테이블에 미통관 재고로 등록
+    - ARRIVED 변경 시: stock_by_lot 테이블에 미통관 재고로 자동 등록합니다.
+    - 필수 정보가 누락된 경우 상태 변경을 거부합니다.
     """
     try:
         with conn.session as s:
@@ -244,7 +245,7 @@ def update_schedule_status(sid, new_status):
                 # [방어 로직] 필수 정보 검증
                 missing_fields = []
                 
-                # 수량 확인 (실입고 > 오픈 > 기본)
+                # 수량 확인
                 qty = 0.0
                 try:
                     if sch.get('actual_in_qty') and float(sch['actual_in_qty']) > 0: qty = float(sch['actual_in_qty'])
@@ -252,10 +253,9 @@ def update_schedule_status(sid, new_status):
                     elif sch.get('quantity'): qty = float(sch['quantity'])
                 except: pass
                 
-                if qty <= 0: missing_fields.append("수량(실입고, 오픈, 또는 기본수량)")
+                if qty <= 0: missing_fields.append("수량(오픈수량 또는 실입고수량)")
                 
-                # 날짜 확인 (실입고일 > ETA > 오늘)
-                # DB에서 가져온 날짜는 date 객체일 수도, 문자열일 수도 있음
+                # 날짜 확인
                 entry_date = None
                 def to_date(d):
                     if isinstance(d, str):
@@ -271,7 +271,7 @@ def update_schedule_status(sid, new_status):
                 if missing_fields:
                     return False, f"필수 정보 누락으로 입고 처리 불가: {', '.join(missing_fields)}"
 
-                # --- DB Insert 시작 ---
+                # 품목 정보 조회
                 prod = s.execute(text("SELECT category, unit FROM products WHERE product_id = :pid"), {"pid": sch['product_id']}).fetchone()
                 cat = prod[0] if prod else '기타'
                 unit = prod[1] if prod else 'Box'
