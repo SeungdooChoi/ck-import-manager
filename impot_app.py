@@ -51,6 +51,15 @@ st.markdown("""
     
     /* 데이터프레임 스타일 */
     .stDataFrame { font-size: 12px; }
+    
+    /* 동적 입력 필드 스타일 */
+    .dynamic-row {
+        background-color: #f8f9fa;
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 5px;
+        border: 1px solid #eee;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -113,7 +122,7 @@ def register_new_product(code, name, cat, unit):
 def get_full_schedule_data(status_filter='ALL'):
     """모든 상세 정보를 포함한 데이터 조회"""
     with conn.session as s:
-        # LEFT JOIN 사용
+        # 모든 컬럼 선택 (LEFT JOIN으로 변경하여 제품 정보 없어도 조회 가능하도록)
         base_sql = """
             SELECT s.*, p.product_name, p.product_code as db_prod_code, p.unit as p_unit
             FROM import_schedules s
@@ -179,7 +188,7 @@ def save_full_schedule(data, sid=None):
 
             if sid:
                 # UPDATE
-                # [중요] ::jsonb 문법 대신 CAST(:param AS JSONB) 사용
+                # [수정] JSON 컬럼 충돌 방지를 위해 ::jsonb 대신 CAST(:param AS JSONB) 사용
                 set_clause_parts = []
                 for col in cols:
                     if col in json_cols:
@@ -358,6 +367,7 @@ def safe_float_parse(val):
 def parse_import_full_excel(df):
     """
     '수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱
+    헤더를 찾아 컬럼 매핑 후 데이터 추출
     """
     valid_data = []
     errors = []
@@ -366,7 +376,7 @@ def parse_import_full_excel(df):
     if p_df.empty: return [], ["시스템에 등록된 품목이 없습니다."]
     product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
-    # 1. 헤더 행 찾기
+    # 1. 헤더 행 찾기 (스코어링 방식 강화)
     keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
     
     def clean_str(s):
@@ -405,7 +415,7 @@ def parse_import_full_excel(df):
             df.columns = df.iloc[header_row_idx]
             data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
         else:
-            return [], ["헤더('CK', '품명' 등)를 찾을 수 없습니다."]
+            return [], ["헤더('CK', '품명' 등)를 찾을 수 없습니다. (상위 20행 검색 실패)"]
 
     data_df.columns = [clean_str(c) for c in data_df.columns]
     cols = list(data_df.columns)
