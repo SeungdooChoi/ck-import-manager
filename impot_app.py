@@ -51,15 +51,6 @@ st.markdown("""
     
     /* 데이터프레임 스타일 */
     .stDataFrame { font-size: 12px; }
-    
-    /* 동적 입력 필드 스타일 */
-    .dynamic-row {
-        background-color: #f8f9fa;
-        padding: 10px;
-        border-radius: 5px;
-        margin-bottom: 5px;
-        border: 1px solid #eee;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -122,7 +113,7 @@ def register_new_product(code, name, cat, unit):
 def get_full_schedule_data(status_filter='ALL'):
     """모든 상세 정보를 포함한 데이터 조회"""
     with conn.session as s:
-        # 모든 컬럼 선택 (LEFT JOIN으로 변경하여 제품 정보 없어도 조회 가능하도록)
+        # LEFT JOIN 사용
         base_sql = """
             SELECT s.*, p.product_name, p.product_code as db_prod_code, p.unit as p_unit
             FROM import_schedules s
@@ -188,7 +179,7 @@ def save_full_schedule(data, sid=None):
 
             if sid:
                 # UPDATE
-                # CAST(:param AS JSONB) 사용으로 문법 오류 해결
+                # [중요] ::jsonb 문법 대신 CAST(:param AS JSONB) 사용
                 set_clause_parts = []
                 for col in cols:
                     if col in json_cols:
@@ -231,21 +222,20 @@ def delete_schedule(sid):
 def update_schedule_status(sid, new_status):
     """
     일정 상태를 변경합니다.
-    - ARRIVED 변경 시: stock_by_lot 테이블에 미통관 재고로 자동 등록합니다.
-    - 필수 정보가 누락된 경우 상태 변경을 거부합니다.
+    - ARRIVED 변경 시: 필수 정보 확인 후 stock_by_lot 테이블에 미통관 재고로 등록
     """
     try:
         with conn.session as s:
-            # 일정 정보 조회
+            # 1. 일정 정보 조회
             sch = s.execute(text("SELECT * FROM import_schedules WHERE id = :sid"), {"sid": sid}).mappings().fetchone()
             if not sch: return False, "일정 정보를 찾을 수 없습니다."
             
-            # 1. ARRIVED 상태로 변경 시 -> 필수 정보 검증 및 재고 등록
+            # 2. ARRIVED 상태로 변경 시 -> 필수 정보 검증 및 재고 등록
             if new_status == 'ARRIVED':
-                # 필수 정보 검증
+                # [방어 로직] 필수 정보 검증
                 missing_fields = []
                 
-                # 수량 확인
+                # 수량 확인 (실입고 > 오픈 > 기본)
                 qty = 0.0
                 try:
                     if sch.get('actual_in_qty') and float(sch['actual_in_qty']) > 0: qty = float(sch['actual_in_qty'])
@@ -253,31 +243,34 @@ def update_schedule_status(sid, new_status):
                     elif sch.get('quantity'): qty = float(sch['quantity'])
                 except: pass
                 
-                if qty <= 0: missing_fields.append("수량(오픈수량 또는 실입고수량)")
+                if qty <= 0: missing_fields.append("수량(실입고, 오픈, 또는 기본수량)")
                 
-                # 날짜 확인
+                # 날짜 확인 (실입고일 > ETA > 오늘)
+                # DB에서 가져온 날짜는 date 객체일 수도, 문자열일 수도 있음
                 entry_date = None
-                def ensure_date_obj(d):
+                def to_date(d):
                     if isinstance(d, str):
                         try: return datetime.strptime(d, '%Y-%m-%d').date()
                         except: return None
                     return d
                 
-                entry_date = ensure_date_obj(sch.get('arrival_date')) or ensure_date_obj(sch.get('expected_date'))
+                if sch.get('arrival_date'): entry_date = to_date(sch.get('arrival_date'))
+                elif sch.get('expected_date'): entry_date = to_date(sch.get('expected_date'))
+                
                 if not entry_date: missing_fields.append("입고일(실입고일 또는 입항일)")
                 
                 if missing_fields:
                     return False, f"필수 정보 누락으로 입고 처리 불가: {', '.join(missing_fields)}"
 
-                # 품목 정보 조회
+                # --- DB Insert 시작 ---
                 prod = s.execute(text("SELECT category, unit FROM products WHERE product_id = :pid"), {"pid": sch['product_id']}).fetchone()
                 cat = prod[0] if prod else '기타'
                 unit = prod[1] if prod else 'Box'
                 lot_no = entry_date.strftime("%Y-%m-%d")
                 
                 wh = sch.get('warehouse') if sch.get('warehouse') else '미정'
-                ck_code_val = sch.get('ck_code', '-') or '-'
-                note_val = sch.get('note', '') or ''
+                ck_code_val = sch.get('ck_code') or '-'
+                note_val = sch.get('note') or ''
                 note_text = f"수입도착({ck_code_val}) {note_val}"
                 
                 # 중복 체크
@@ -313,26 +306,27 @@ def update_schedule_status(sid, new_status):
                         VALUES ('IN', :pid, :lot, :qty, 0, '수입도착(미통관)', 'VALID', NOW())
                     """), {"pid": sch['product_id'], "lot": lot_no, "qty": qty})
             
-            # 2. CANCELED/PENDING 복구 시 -> 해당 재고 삭제 시도
+            # 3. CANCELED/PENDING 복구 시 -> 해당 재고 삭제 시도
             elif new_status in ['CANCELED', 'PENDING']:
-                 # 날짜 파싱 재시도 (삭제 쿼리용)
-                 def ensure_date_obj_del(d):
+                 # 날짜 재계산
+                 def to_date_del(d):
                     if isinstance(d, str):
                         try: return datetime.strptime(d, '%Y-%m-%d').date()
-                        except: return get_kst_today() # 임시
-                    return d
-                 
-                 e_date = ensure_date_obj_del(sch.get('arrival_date')) or ensure_date_obj_del(sch.get('expected_date')) or get_kst_today()
+                        except: return get_kst_today()
+                    return d if d else get_kst_today()
+
+                 e_date = to_date_del(sch.get('arrival_date')) or to_date_del(sch.get('expected_date'))
                  l_no = e_date.strftime("%Y-%m-%d")
                  
-                 ck_code_val = sch.get('ck_code', '-') or '-'
+                 ck_code_val = sch.get('ck_code') or '-'
                  note_pattern = f"수입도착({ck_code_val})%"
+                 
                  s.execute(text("""
                     DELETE FROM stock_by_lot 
                     WHERE product_id = :pid AND lot_number = :lot AND note LIKE :note AND is_cleared = FALSE
                  """), {"pid": sch['product_id'], "lot": l_no, "note": note_pattern})
 
-            # 3. 상태 업데이트 (가장 마지막에 수행)
+            # 4. 상태 업데이트
             s.execute(text("UPDATE import_schedules SET status = :st WHERE id = :sid"), {"st": new_status, "sid": sid})
             s.commit()
             
@@ -364,7 +358,6 @@ def safe_float_parse(val):
 def parse_import_full_excel(df):
     """
     '수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱
-    헤더를 찾아 컬럼 매핑 후 데이터 추출
     """
     valid_data = []
     errors = []
@@ -373,7 +366,7 @@ def parse_import_full_excel(df):
     if p_df.empty: return [], ["시스템에 등록된 품목이 없습니다."]
     product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
     
-    # 1. 헤더 행 찾기 (스코어링 방식 강화)
+    # 1. 헤더 행 찾기
     keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
     
     def clean_str(s):
@@ -412,7 +405,7 @@ def parse_import_full_excel(df):
             df.columns = df.iloc[header_row_idx]
             data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
         else:
-            return [], ["헤더('CK', '품명' 등)를 찾을 수 없습니다. (상위 20행 검색 실패)"]
+            return [], ["헤더('CK', '품명' 등)를 찾을 수 없습니다."]
 
     data_df.columns = [clean_str(c) for c in data_df.columns]
     cols = list(data_df.columns)
@@ -424,6 +417,7 @@ def parse_import_full_excel(df):
                 if k_clean in c: return c
         return None
 
+    # 컬럼 매핑
     col_map = {
         'ck': find_col(['CK', '관리번호']), 'global': find_col(['글로벌']), 'doojin': find_col(['두진']),
         'agency': find_col(['대행']), 'agency_contract': find_col(['대행계약서']),
