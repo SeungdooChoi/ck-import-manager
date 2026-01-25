@@ -276,7 +276,9 @@ def save_full_schedule(data, sid=None):
             
             if not params.get('status'): params['status'] = 'PENDING'
 
+            target_id = None
             if sid:
+                # CAST 문법 적용
                 set_clause_parts = []
                 for col in cols:
                     if col in json_cols: set_clause_parts.append(f"{col} = CAST(:{col} AS JSONB)")
@@ -293,7 +295,6 @@ def save_full_schedule(data, sid=None):
                     if col in json_cols: val_parts.append(f"CAST(:{col} AS JSONB)")
                     else: val_parts.append(f":{col}")
                 val_str = ", ".join(val_parts)
-                # RETURNING id to get the new ID
                 sql = f"INSERT INTO import_schedules ({col_str}) VALUES ({val_str}) RETURNING id"
                 result = s.execute(text(sql), params)
                 target_id = result.fetchone()[0]
@@ -301,14 +302,14 @@ def save_full_schedule(data, sid=None):
             s.commit()
 
         # [중요] 저장 후 재고 테이블과 동기화 시도 (ARRIVED 상태일 경우)
-        if params['status'] == 'ARRIVED':
+        if params['status'] == 'ARRIVED' and target_id:
             ok, msg = sync_import_to_inventory(target_id)
             if not ok:
                 # 동기화 실패 시 상태를 다시 PENDING으로 롤백
                 with conn.session as s:
                     s.execute(text("UPDATE import_schedules SET status = 'PENDING' WHERE id = :id"), {"id": target_id})
                     s.commit()
-                return True, f"일정은 저장되었으나, 필수 정보 부족으로 '진행중' 상태로 유지됩니다. ({msg})"
+                return False, f"저장은 되었으나 재고 생성 실패 (정보누락): {msg}"
         
         return True, "저장 완료"
     except Exception as e: return False, str(e)
@@ -352,6 +353,7 @@ def safe_date_parse(val):
     try:
         if isinstance(val, datetime): return val.strftime('%Y-%m-%d')
         s_val = str(val).strip()
+        # 다양한 날짜 형식 지원
         if re.match(r'^\d{2}/\d{2}/\d{2}$', s_val): # 25/01/01
             dt = datetime.strptime(s_val, "%y/%m/%d")
             if dt.year < 2000: dt = dt.replace(year=dt.year+2000)
