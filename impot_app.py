@@ -243,38 +243,42 @@ def update_schedule_status(sid, new_status):
             sch = s.execute(text("SELECT * FROM import_schedules WHERE id = :sid"), {"sid": sid}).mappings().fetchone()
             if not sch: return False, "일정 정보를 찾을 수 없습니다."
 
-            # 입고일: 실제 입고일(arrival_date) > 입항일(expected_date) > 오늘
-            entry_date = sch['arrival_date'] if sch['arrival_date'] else (sch['expected_date'] if sch['expected_date'] else get_kst_today())
+            # 입고일 결정 로직: 실입고일 > ETA > 오늘 (형식 변환 주의)
+            # sch['arrival_date']가 string으로 올 수도 있고 date 객체로 올 수도 있음
+            def ensure_date_obj(d):
+                if isinstance(d, str):
+                    try: return datetime.strptime(d, '%Y-%m-%d').date()
+                    except: return get_kst_today()
+                return d
+            
+            entry_date = ensure_date_obj(sch['arrival_date']) if sch['arrival_date'] else (ensure_date_obj(sch['expected_date']) if sch['expected_date'] else get_kst_today())
             lot_no = entry_date.strftime("%Y-%m-%d")
 
             # 2. ARRIVED 상태로 변경 시 -> stock_by_lot 테이블에 미통관 재고로 등록
             if new_status == 'ARRIVED':
-                # 품목 정보 조회 (카테고리, 단위)
+                # 품목 정보 조회
                 prod = s.execute(text("SELECT category, unit FROM products WHERE product_id = :pid"), {"pid": sch['product_id']}).fetchone()
                 cat = prod[0] if prod else '기타'
                 unit = prod[1] if prod else 'Box'
                 
-                # 수량: 실입고 수량 > 오픈 수량 > 기본 수량 (0보다 큰 값 우선)
+                # 수량 결정: 실입고 > 오픈 > 기본
                 qty = 0
-                if sch['actual_in_qty'] and sch['actual_in_qty'] > 0: qty = sch['actual_in_qty']
-                elif sch['open_qty'] and sch['open_qty'] > 0: qty = sch['open_qty']
-                else: qty = sch['quantity']
+                if sch['actual_in_qty'] and float(sch['actual_in_qty']) > 0: qty = float(sch['actual_in_qty'])
+                elif sch['open_qty'] and float(sch['open_qty']) > 0: qty = float(sch['open_qty'])
+                else: qty = float(sch['quantity']) if sch['quantity'] else 0
                 
                 if qty > 0:
-                    # 창고
                     wh = sch['warehouse'] if sch['warehouse'] else '미정'
-                    
-                    # 비고에 CK 코드 등 원천 정보 기재
                     note_text = f"수입도착({sch['ck_code'] or '-'}) {sch['note'] or ''}"
                     
-                    # 재고 테이블 Insert (is_cleared = FALSE: 미통관)
-                    # 중복 등록 방지를 위해 먼저 확인 (같은 입고일, 같은 품목, 같은 수량, 같은 비고)
-                    check_stock = s.execute(text("""
+                    # 중복 체크 (제품, LOT, 수량, 미통관 상태)
+                    # 동일한 조건으로 이미 등록된 건이 있는지 확인하여 중복 생성 방지
+                    check = s.execute(text("""
                         SELECT stock_id FROM stock_by_lot 
-                        WHERE product_id = :pid AND lot_number = :lot AND quantity = :qty AND note = :note AND is_cleared = FALSE
-                    """), {"pid": sch['product_id'], "lot": lot_no, "qty": qty, "note": note_text}).fetchone()
-
-                    if not check_stock:
+                        WHERE product_id = :pid AND lot_number = :lot AND quantity = :qty AND is_cleared = FALSE
+                    """), {"pid": sch['product_id'], "lot": lot_no, "qty": qty}).fetchone()
+                    
+                    if not check:
                         s.execute(text("""
                             INSERT INTO stock_by_lot 
                             (product_id, lot_number, quantity, entry_date, warehouse_loc, manufacturer, unit_price, size, note, category, unit, is_cleared)
@@ -294,16 +298,15 @@ def update_schedule_status(sid, new_status):
                             "unit": unit
                         })
                         
-                        # 입고 이력 남기기
+                        # 이력 남기기
                         s.execute(text("""
                             INSERT INTO transactions 
                             (trans_type, product_id, lot_number, quantity, manager_id, remarks, status, trans_date) 
                             VALUES ('IN', :pid, :lot, :qty, 0, '수입도착(미통관)', 'VALID', NOW())
                         """), {"pid": sch['product_id'], "lot": lot_no, "qty": qty})
             
-            # 3. CANCELED 상태로 변경 시 -> stock_by_lot 테이블에서 해당 재고 삭제 (잘못 등록된 경우 등)
-            elif new_status == 'CANCELED' or new_status == 'PENDING':
-                 # 비고에 CK 코드가 포함된 미통관 재고를 찾아 삭제 (완벽한 롤백은 어렵지만 최대한 매칭)
+            # 3. CANCELED/PENDING 복구 시 -> 해당 재고 삭제 시도
+            elif new_status in ['CANCELED', 'PENDING']:
                  note_pattern = f"수입도착({sch['ck_code'] or '-'})%"
                  s.execute(text("""
                     DELETE FROM stock_by_lot 
