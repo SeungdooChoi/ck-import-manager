@@ -169,13 +169,13 @@ def save_full_schedule(data, sid=None):
                         try: params[k] = float(str(val).replace(',', '').strip())
                         except: params[k] = 0
                 elif k in json_cols:
-                    # JSON 데이터 처리
+                    # JSON 데이터 처리: 반드시 json.dumps()로 문자열 변환
                     if isinstance(val, (list, dict)):
                         params[k] = json.dumps(val, ensure_ascii=False)
                     elif isinstance(val, str) and (val.startswith('[') or val.startswith('{')):
                         params[k] = val # 이미 JSON 문자열인 경우
                     else:
-                        params[k] = '[]' # 기본값
+                        params[k] = '[]' # 기본값 (빈 배열)
                 else:
                     if val is None or str(val).strip() == '' or str(val).lower() == 'nan':
                         params[k] = None
@@ -188,7 +188,7 @@ def save_full_schedule(data, sid=None):
 
             if sid:
                 # UPDATE
-                # [수정] JSON 컬럼 충돌 방지를 위해 ::jsonb 대신 CAST(:param AS JSONB) 사용
+                # JSON 컬럼에 대해서는 CAST(:param AS JSONB) 사용
                 set_clause_parts = []
                 for col in cols:
                     if col in json_cols:
