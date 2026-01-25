@@ -253,48 +253,69 @@ def save_full_schedule(data, sid=None):
                 'clearance_info', 'declaration_info'
             ]
             
+            # 숫자형 컬럼 리스트 (0으로 처리할 것들)
             numeric_cols = ['quantity', 'unit_price', 'open_qty', 'doc_qty', 'box_qty', 'open_amount', 'doc_amount', 
                             'actual_in_qty', 'acceptance_rate', 'acceptance_fee', 'discount_fee', 'payment_amount', 
                             'exchange_rate', 'balance', 'avg_exchange_rate']
+            
+            # JSON 컬럼 리스트
             json_cols = ['clearance_info', 'declaration_info']
 
             params = {}
             for k in cols:
                 val = data.get(k)
                 if k in numeric_cols:
-                    if val is None or str(val).strip() == '': params[k] = 0
+                    if val is None or str(val).strip() == '':
+                        params[k] = 0
                     else:
                         try: params[k] = float(str(val).replace(',', '').strip())
                         except: params[k] = 0
                 elif k in json_cols:
-                    if isinstance(val, (list, dict)): params[k] = json.dumps(val, ensure_ascii=False)
-                    elif isinstance(val, str) and (val.startswith('[') or val.startswith('{')): params[k] = val
-                    else: params[k] = '[]'
+                    # JSON 데이터 처리: 반드시 json.dumps()로 문자열 변환
+                    if isinstance(val, (list, dict)):
+                        params[k] = json.dumps(val, ensure_ascii=False)
+                    elif isinstance(val, str) and (val.startswith('[') or val.startswith('{')):
+                        params[k] = val # 이미 JSON 문자열인 경우
+                    else:
+                        params[k] = '[]' # 기본값 (빈 배열)
                 else:
-                    if val is None or str(val).strip() == '' or str(val).lower() == 'nan': params[k] = None
-                    else: params[k] = val
+                    if val is None or str(val).strip() == '' or str(val).lower() == 'nan':
+                        params[k] = None
+                    else:
+                        params[k] = val
             
-            if not params.get('status'): params['status'] = 'PENDING'
+            # status 값 강제 설정 (값이 없으면 PENDING)
+            if not params.get('status'):
+                params['status'] = 'PENDING'
 
             target_id = None
             if sid:
-                # CAST 문법 적용
+                # UPDATE
+                # [수정] JSON 컬럼 충돌 방지를 위해 ::jsonb 대신 CAST(:param AS JSONB) 사용
                 set_clause_parts = []
                 for col in cols:
-                    if col in json_cols: set_clause_parts.append(f"{col} = CAST(:{col} AS JSONB)")
-                    else: set_clause_parts.append(f"{col} = :{col}")
+                    if col in json_cols:
+                        set_clause_parts.append(f"{col} = CAST(:{col} AS JSONB)")
+                    else:
+                        set_clause_parts.append(f"{col} = :{col}")
+                
                 set_clause = ", ".join(set_clause_parts)
                 sql = f"UPDATE import_schedules SET {set_clause} WHERE id = :id"
                 params['id'] = sid
                 s.execute(text(sql), params)
                 target_id = sid
             else:
+                # INSERT
                 col_str = ", ".join(cols)
                 val_parts = []
                 for col in cols:
-                    if col in json_cols: val_parts.append(f"CAST(:{col} AS JSONB)")
-                    else: val_parts.append(f":{col}")
+                    if col in json_cols:
+                        val_parts.append(f"CAST(:{col} AS JSONB)")
+                    else:
+                        val_parts.append(f":{col}")
+                
                 val_str = ", ".join(val_parts)
+                # RETURNING id 사용
                 sql = f"INSERT INTO import_schedules ({col_str}) VALUES ({val_str}) RETURNING id"
                 result = s.execute(text(sql), params)
                 target_id = result.fetchone()[0]
