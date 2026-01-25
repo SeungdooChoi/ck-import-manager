@@ -228,6 +228,76 @@ def delete_schedule(sid):
         return True, "삭제 완료"
     except Exception as e: return False, str(e)
 
+def update_schedule_status(sid, new_status):
+    """
+    일정 상태를 변경합니다.
+    - ARRIVED 변경 시: stock_by_lot 테이블에 미통관 재고로 자동 등록합니다.
+    """
+    try:
+        with conn.session as s:
+            # 1. 상태 업데이트
+            s.execute(text("UPDATE import_schedules SET status = :st WHERE id = :sid"), {"st": new_status, "sid": sid})
+            
+            # 2. ARRIVED 상태로 변경 시 -> stock_by_lot 테이블에 미통관 재고로 등록
+            if new_status == 'ARRIVED':
+                # 일정 정보 조회
+                sch = s.execute(text("SELECT * FROM import_schedules WHERE id = :sid"), {"sid": sid}).mappings().fetchone()
+                
+                if sch:
+                    # 품목 정보 조회 (카테고리, 단위)
+                    prod = s.execute(text("SELECT category, unit FROM products WHERE product_id = :pid"), {"pid": sch['product_id']}).fetchone()
+                    cat = prod[0] if prod else '기타'
+                    unit = prod[1] if prod else 'Box'
+                    
+                    # 데이터 준비
+                    # 입고일: 실제 입고일(arrival_date) > 입항일(expected_date) > 오늘
+                    entry_date = sch['arrival_date'] if sch['arrival_date'] else (sch['expected_date'] if sch['expected_date'] else get_kst_today())
+                    lot_no = entry_date.strftime("%Y-%m-%d")
+                    
+                    # 수량: 실입고 수량 > 오픈 수량 > 기본 수량 (0보다 큰 값 우선)
+                    qty = 0
+                    if sch['actual_in_qty'] and sch['actual_in_qty'] > 0: qty = sch['actual_in_qty']
+                    elif sch['open_qty'] and sch['open_qty'] > 0: qty = sch['open_qty']
+                    else: qty = sch['quantity']
+                    
+                    if qty > 0:
+                        # 창고
+                        wh = sch['warehouse'] if sch['warehouse'] else '미정'
+                        
+                        # 비고에 CK 코드 등 원천 정보 기재
+                        note_text = f"수입도착({sch['ck_code'] or '-'}) {sch['note'] or ''}"
+                        
+                        # 재고 테이블 Insert (is_cleared = FALSE: 미통관)
+                        s.execute(text("""
+                            INSERT INTO stock_by_lot 
+                            (product_id, lot_number, quantity, entry_date, warehouse_loc, manufacturer, unit_price, size, note, category, unit, is_cleared)
+                            VALUES 
+                            (:pid, :lot, :qty, :ed, :wh, :man, :price, :size, :note, :cat, :unit, FALSE)
+                        """), {
+                            "pid": sch['product_id'],
+                            "lot": lot_no,
+                            "qty": qty,
+                            "ed": entry_date,
+                            "wh": wh,
+                            "man": sch['supplier'],
+                            "price": sch['unit_price'] or 0,
+                            "size": sch['size'],
+                            "note": note_text,
+                            "cat": cat,
+                            "unit": unit
+                        })
+                        
+                        # 입고 이력 남기기
+                        s.execute(text("""
+                            INSERT INTO transactions 
+                            (trans_type, product_id, lot_number, quantity, manager_id, remarks, status, trans_date) 
+                            VALUES ('IN', :pid, :lot, :qty, 0, '수입도착(미통관)', 'VALID', NOW())
+                        """), {"pid": sch['product_id'], "lot": lot_no, "qty": qty})
+
+            s.commit()
+        return True, "상태 변경 및 재고(미통관) 등록 완료"
+    except Exception as e: return False, str(e)
+
 # --- 유틸리티 함수 ---
 def safe_date_parse(val):
     if pd.isna(val) or str(val).strip() == '': return None
