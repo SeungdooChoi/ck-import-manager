@@ -92,7 +92,31 @@ try:
         """))
         for col_name, col_type in common_cols:
             s.execute(text(f"ALTER TABLE export_schedules ADD COLUMN IF NOT EXISTS {col_name} {col_type};"))
-            
+        
+        # 3. Triangular Trades 테이블 생성 (부가 정보 태그용)
+        # ck_code, origin, product_name 등은 import_id로 찾을 수도 있지만, 스냅샷 성격으로 저장
+        s.execute(text("""
+            CREATE TABLE IF NOT EXISTS triangular_trades (
+                id SERIAL PRIMARY KEY,
+                import_id INTEGER,
+                ck_code TEXT,
+                importer TEXT,
+                origin TEXT,
+                product_name TEXT,
+                size TEXT,
+                packing TEXT,
+                open_qty NUMERIC,
+                unit TEXT,
+                open_amount NUMERIC,
+                invoice_no TEXT,
+                eta DATE,
+                payment_date DATE,
+                payment_amount NUMERIC,
+                exchange_rate NUMERIC,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """))
+
         s.commit()
 except Exception as e:
     st.error(f"🚨 DB 연결 오류: .streamlit/secrets.toml을 확인하세요.\n{e}")
@@ -298,6 +322,49 @@ def save_editor_changes(edited_rows, original_df, table_name='export_schedules')
             ok, msg = save_schedule(row_data, row_data['id'], table_name)
             if ok: success_cnt += 1
         return True, f"{success_cnt}건 수정 완료"
+    except Exception as e: return False, str(e)
+
+# --- 삼각무역 전용 함수 ---
+def get_triangular_trades(import_id):
+    """특정 수입 건에 연결된 삼각무역 태그 조회"""
+    try:
+        with conn.session as s:
+            df = pd.DataFrame(s.execute(text("SELECT * FROM triangular_trades WHERE import_id = :id ORDER BY id"), {"id": import_id}).fetchall())
+            return df
+    except Exception: return pd.DataFrame()
+
+def save_triangular_trade(data):
+    """삼각무역 태그 저장 (INSERT)"""
+    try:
+        with conn.session as s:
+            cols = ['import_id', 'ck_code', 'importer', 'origin', 'product_name', 'size', 'packing', 
+                    'open_qty', 'unit', 'open_amount', 'invoice_no', 'eta', 'payment_date', 'payment_amount', 'exchange_rate']
+            
+            params = {}
+            for k in cols:
+                val = data.get(k)
+                if k in ['open_qty', 'open_amount', 'payment_amount', 'exchange_rate']:
+                    try: params[k] = float(str(val).replace(',', '').strip()) if val else 0.0
+                    except: params[k] = 0.0
+                elif k in ['eta', 'payment_date']:
+                    params[k] = val if val else None
+                else:
+                    params[k] = val if val else None
+
+            # 항상 INSERT (태그 추가 개념)
+            col_str = ", ".join(cols)
+            val_str = ", ".join([f":{c}" for c in cols])
+            s.execute(text(f"INSERT INTO triangular_trades ({col_str}) VALUES ({val_str})"), params)
+            s.commit()
+        return True, "삼각무역 정보 추가 완료"
+    except Exception as e: return False, str(e)
+
+def delete_triangular_trade(tid):
+    try:
+        with conn.session as s:
+            s.execute(text("DELETE FROM triangular_trades WHERE id = :id"), {"id": tid})
+            s.commit()
+        return True, "삭제 완료"
     except Exception as e: return False, str(e)
 
 # --- 유틸리티 ---
@@ -557,102 +624,91 @@ with tab_export:
             else: st.info("변경 사항이 없습니다.")
     else: st.warning("등록된 수출 건이 없습니다.")
 
-# --- TAB 4: 삼각무역 (Triangular) - Detail Editor ---
+# --- TAB 4: 삼각무역 (Triangular) - Tag Management ---
 with tab_triangular:
-    st.markdown("### 📐 삼각무역 (수입 건 상세 관리)")
-    st.markdown("기존 수입 건을 선택하여 **L/C, 서류, 결제** 등의 상세 정보를 입력합니다.")
+    st.markdown("### 📐 삼각무역 (부가 정보 관리)")
+    st.markdown("기존 수입 건에 **삼각무역 관련 부가 정보(Tag)**를 연결하여 관리합니다.")
     
-    imp_df = get_schedule_data('import_schedules', 'ALL')
-    if imp_df.empty:
-        st.warning("등록된 수입 건이 없습니다.")
-    else:
-        imp_df['label'] = imp_df.apply(lambda x: f"[{x['ck_code'] or 'NO-CK'}] {x['product_name']} (Supp: {x['supplier']})", axis=1)
-        sel_id = st.selectbox("대상 수입 건 선택", imp_df['id'], format_func=lambda x: imp_df[imp_df['id']==x]['label'].values[0])
-        
-        target_row = imp_df[imp_df['id'] == sel_id].iloc[0].to_dict()
-        
-        with st.form("tri_trade_form"):
-            st.markdown("<div class='tri-header'>기본 물품 정보</div>", unsafe_allow_html=True)
-            c1, c2, c3, c4 = st.columns(4)
-            ck = c1.text_input("CK 관리번호", value=target_row.get('ck_code') or '')
-            gl = c2.text_input("글로벌", value=target_row.get('global_code') or '')
-            dj = c3.text_input("두진", value=target_row.get('doojin_code') or '')
-            sp = c4.text_input("수출자(수입자)", value=target_row.get('supplier') or '')
+    col_sel, col_detail = st.columns([1, 2])
+    
+    with col_sel:
+        st.markdown("#### 1. 대상 수입 건 선택")
+        imp_df = get_schedule_data('import_schedules', 'ALL')
+        if imp_df.empty:
+            st.warning("등록된 수입 건이 없습니다.")
+            selected_imp_id = None
+        else:
+            imp_df['label'] = imp_df.apply(lambda x: f"[{x['ck_code'] or 'NO-CK'}] {x['product_name']}", axis=1)
+            selected_imp_id = st.selectbox("수입 건 목록", imp_df['id'], format_func=lambda x: imp_df[imp_df['id']==x]['label'].values[0])
+    
+    with col_detail:
+        if selected_imp_id:
+            target_row = imp_df[imp_df['id'] == selected_imp_id].iloc[0].to_dict()
             
-            c1, c2, c3, c4 = st.columns(4)
-            og = c1.text_input("원산지", value=target_row.get('origin') or '')
-            pn = c2.text_input("품명 (참고용)", value=target_row.get('product_name') or '', disabled=True) 
-            sz = c3.text_input("사이즈", value=target_row.get('size') or '')
-            pk = c4.text_input("Packing", value=target_row.get('packing') or '')
-            
-            c1, c2, c3, c4, c5 = st.columns(5)
-            oq = c1.number_input("오픈수량", value=float(target_row.get('open_qty') or 0))
-            un = c2.text_input("단위", value=target_row.get('unit') or '') 
-            dq = c3.number_input("서류수량", value=float(target_row.get('doc_qty') or 0))
-            up = c4.number_input("단가(USD)", value=float(target_row.get('unit_price') or 0), format="%.2f")
-            u2 = c5.text_input("단위(2)", value=target_row.get('unit2') or '')
-            
-            c1, c2 = st.columns(2)
-            oa = c1.number_input("오픈금액", value=float(target_row.get('open_amount') or 0), format="%.2f")
-            da = c2.number_input("서류금액", value=float(target_row.get('doc_amount') or 0), format="%.2f")
-            
-            st.markdown("<div class='tri-header tri-header-lc'>L/C 및 금융 정보</div>", unsafe_allow_html=True)
-            c1, c2, c3, c4 = st.columns(4)
-            tt = c1.text_input("T/T", value=target_row.get('tt_check') or '')
-            bk = c2.text_input("은행", value=target_row.get('bank') or '')
-            us = c3.text_input("Usance", value=target_row.get('usance') or '')
-            od = c4.date_input("개설일", value=safe_date_parse(target_row.get('open_date')))
+            st.markdown("#### 2. 선택된 수입 건 정보 (참고용)")
+            c1, c2, c3 = st.columns(3)
+            c1.info(f"**CK관리번호**: {target_row.get('ck_code') or '-'}")
+            c2.info(f"**원산지**: {target_row.get('origin') or '-'}")
+            c3.info(f"**품명**: {target_row.get('product_name')}")
 
-            c1, c2, c3, c4 = st.columns(4)
-            ln = c1.text_input("L/C No.", value=target_row.get('lc_no') or '')
-            iv = c2.text_input("Invoice No.", value=target_row.get('invoice_no') or '')
-            bl = c3.text_input("B/L No.", value=target_row.get('bl_no') or '')
-            ins = c4.text_input("보험", value=target_row.get('insurance') or '')
-            
-            st.markdown("<div class='tri-header'>입고 및 물류</div>", unsafe_allow_html=True)
-            c1, c2, c3, c4, c5 = st.columns(5)
-            etd = c1.date_input("ETD", value=safe_date_parse(target_row.get('etd')))
-            eta = c2.date_input("ETA", value=safe_date_parse(target_row.get('expected_date')))
-            aer = c3.number_input("도착일 환율", value=float(target_row.get('arrival_exchange_rate') or 0), format="%.2f")
-            dst = c4.text_input("도착지(착지)", value=target_row.get('destination') or '')
-            riq = c5.number_input("실입고 수량", value=float(target_row.get('actual_in_qty') or 0))
-            
-            rem = st.text_area("비고", value=target_row.get('note') or '', height=60)
-            
-            st.markdown("<div class='tri-header tri-header-pay'>결제 및 정산</div>", unsafe_allow_html=True)
-            c1, c2, c3, c4 = st.columns(4)
-            dac = c1.date_input("서류인수일", value=safe_date_parse(target_row.get('doc_acceptance')))
-            acr = c2.number_input("인수수수료율(%)", value=float(target_row.get('acceptance_rate') or 0), format="%.2f")
-            md = c3.date_input("만기일", value=safe_date_parse(target_row.get('maturity_date')))
-            emd = c4.date_input("연장만기일", value=safe_date_parse(target_row.get('ext_maturity_date')))
-            
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-            acf = c1.number_input("인수수수료", value=float(target_row.get('acceptance_fee') or 0))
-            dcf = c2.number_input("인수할인료", value=float(target_row.get('discount_fee') or 0))
-            pd_val = c3.date_input("결제일", value=safe_date_parse(target_row.get('payment_date')))
-            pa = c4.number_input("결제금액", value=float(target_row.get('payment_amount') or 0))
-            er = c5.number_input("환율", value=float(target_row.get('exchange_rate') or 0))
-            bal = c6.number_input("잔액", value=float(target_row.get('balance') or 0))
-
-            if st.form_submit_button("💾 상세 정보 저장", type="primary", use_container_width=True):
-                save_data = {
-                    'ck_code': ck, 'global_code': gl, 'doojin_code': dj, 'supplier': sp, 'origin': og,
-                    'size': sz, 'packing': pk, 'open_qty': oq, 'unit': un, 'doc_qty': dq, 
-                    'unit_price': up, 'unit2': u2, 'open_amount': oa, 'doc_amount': da,
-                    'tt_check': tt, 'bank': bk, 'usance': us, 'open_date': od,
-                    'lc_no': ln, 'invoice_no': iv, 'bl_no': bl, 'insurance': ins,
-                    'etd': etd, 'expected_date': eta, 'arrival_exchange_rate': aer, 'destination': dst, 'actual_in_qty': riq,
-                    'note': rem,
-                    'doc_acceptance': dac, 'acceptance_rate': acr, 'maturity_date': md, 'ext_maturity_date': emd,
-                    'acceptance_fee': acf, 'discount_fee': dcf, 'payment_date': pd_val, 'payment_amount': pa,
-                    'exchange_rate': er, 'balance': bal
-                }
-                ok, msg = save_schedule(save_data, sel_id, 'import_schedules')
-                if ok:
-                    st.success("상세 정보가 업데이트되었습니다.")
-                    time.sleep(1)
+            st.markdown("#### 3. 연결된 삼각무역 정보 (목록)")
+            tri_df = get_triangular_trades(selected_imp_id)
+            if not tri_df.empty:
+                st.dataframe(tri_df, use_container_width=True, hide_index=True)
+                # 간단 삭제 UI
+                del_tid = st.selectbox("삭제할 태그 ID 선택", tri_df['id'], key="del_tri_sel")
+                if st.button("🗑️ 선택한 태그 삭제"):
+                    delete_triangular_trade(del_tid)
                     st.rerun()
-                else: st.error(f"저장 실패: {msg}")
+            else:
+                st.caption("아직 연결된 정보가 없습니다.")
+
+            st.markdown("#### 4. 신규 정보 추가 (Tag)")
+            with st.form("add_tri_tag_form"):
+                st.caption("아래 정보를 입력하여 해당 수입 건에 꼬리표를 붙입니다.")
+                # 자동 입력되는 필드 (Read-only 처럼 표시하지만 DB저장을 위해 value 할당)
+                c1, c2, c3 = st.columns(3)
+                in_ck = c1.text_input("CK관리번호 (자동)", value=target_row.get('ck_code') or '', disabled=True)
+                in_og = c2.text_input("원산지 (자동)", value=target_row.get('origin') or '', disabled=True)
+                in_pn = c3.text_input("품명 (자동)", value=target_row.get('product_name') or '', disabled=True)
+
+                c1, c2, c3 = st.columns(3)
+                in_importer = c1.text_input("수입자", placeholder="Buyer 입력")
+                in_size = c2.text_input("사이즈")
+                in_packing = c3.text_input("Packing")
+                
+                c1, c2, c3 = st.columns(3)
+                in_qty = c1.number_input("오픈수량", value=0.0)
+                in_unit = c2.text_input("단위")
+                in_amt = c3.number_input("오픈금액", value=0.0)
+                
+                c1, c2 = st.columns(2)
+                in_inv = c1.text_input("Invoice No.")
+                in_eta = c2.date_input("ETA", value=None)
+                
+                c1, c2, c3 = st.columns(3)
+                in_pay_dt = c1.date_input("결제일", value=None)
+                in_pay_amt = c2.number_input("결제금액", value=0.0)
+                in_ex_rate = c3.number_input("환율", value=0.0)
+
+                if st.form_submit_button("➕ 정보 추가 (Tag)"):
+                    new_tag = {
+                        'import_id': selected_imp_id,
+                        'ck_code': target_row.get('ck_code'),
+                        'origin': target_row.get('origin'),
+                        'product_name': target_row.get('product_name'),
+                        'importer': in_importer,
+                        'size': in_size, 'packing': in_packing,
+                        'open_qty': in_qty, 'unit': in_unit, 'open_amount': in_amt,
+                        'invoice_no': in_inv, 'eta': in_eta,
+                        'payment_date': in_pay_dt, 'payment_amount': in_pay_amt, 'exchange_rate': in_ex_rate
+                    }
+                    ok, msg = save_triangular_trade(new_tag)
+                    if ok:
+                        st.success(msg)
+                        time.sleep(1)
+                        st.rerun()
+                    else: st.error(f"오류: {msg}")
 
 # --- TAB 5: 등록 및 관리 (복원됨) ---
 with tab_manage:
