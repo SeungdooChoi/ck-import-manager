@@ -582,14 +582,17 @@ MENU_OPTIONS = [
 if 'nav_menu' not in st.session_state:
     st.session_state['nav_menu'] = MENU_OPTIONS[0]
 
+# [중요] 데이터프레임 선택 초기화용 키
+if 'df_key_tracker' not in st.session_state:
+    st.session_state['df_key_tracker'] = 0
+
 # 네비게이션 (라디오 버튼)
-# index 옵션을 제거하고 key만 사용하여 session_state 값에 전적으로 의존하게 함
 selected_tab = st.radio(
     "메뉴 이동", 
     MENU_OPTIONS, 
     horizontal=True, 
     label_visibility="collapsed",
-    key="nav_menu" # 이 Key가 네비게이션의 핵심 상태입니다.
+    key="nav_menu" 
 )
 
 # --- TAB 1: 수입진행상황 ---
@@ -622,6 +625,9 @@ elif selected_tab == MENU_OPTIONS[1]:
         if 'tri_cnt' in df_ledger.columns:
             df_ledger.insert(0, '구분', df_ledger['tri_cnt'].apply(lambda x: '삼각' if x > 0 else ''))
         
+        # [수정] 동적 키 사용 (선택 상태 초기화용)
+        dynamic_key = f"ledger_df_{st.session_state['df_key_tracker']}"
+        
         event = st.dataframe(
             df_ledger, 
             use_container_width=True, 
@@ -629,7 +635,7 @@ elif selected_tab == MENU_OPTIONS[1]:
             hide_index=True,
             on_select="rerun",
             selection_mode="single-row",
-            key="ledger_df"
+            key=dynamic_key
         )
         
         if len(event.selection.rows) > 0:
@@ -643,8 +649,9 @@ elif selected_tab == MENU_OPTIONS[1]:
             try: st.session_state['declaration_list'] = json.loads(selected_row.get('declaration_info')) if selected_row.get('declaration_info') else []
             except: st.session_state['declaration_list'] = []
             
-            # [핵심 수정] 네비게이션 키 값을 직접 변경하여 탭 이동 강제
+            # [핵심 수정] 탭 이동 및 데이터프레임 키 변경(다음 렌더링 시 선택 초기화)
             st.session_state['nav_menu'] = MENU_OPTIONS[4] # "📝 수입 등록/관리"
+            st.session_state['df_key_tracker'] += 1
             st.rerun()
             
     else: st.info("데이터가 없습니다.")
