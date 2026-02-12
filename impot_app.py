@@ -563,7 +563,7 @@ def parse_import_full_excel(df):
     return valid_data, errors
 
 # ==========================================
-# 2. 메인 UI 구성 (st.radio로 탭 대체)
+# 2. 메인 UI 구성 (st.radio로 탭 대체 - Key 기반)
 # ==========================================
 
 st.title("🚢 수입/수출 통합 관리 시스템")
@@ -578,34 +578,22 @@ MENU_OPTIONS = [
     "📦 품목 관리"
 ]
 
-# 세션 스테이트 초기화 (현재 탭)
-if 'current_tab' not in st.session_state:
-    st.session_state['current_tab'] = MENU_OPTIONS[0]
+# 네비게이션 초기화 (Key가 Single Source of Truth)
+if 'nav_menu' not in st.session_state:
+    st.session_state['nav_menu'] = MENU_OPTIONS[0]
 
-# [수정] 탭 변경 콜백 함수 (사용자가 라디오 버튼을 직접 클릭했을 때)
-def on_tab_change():
-    st.session_state['current_tab'] = st.session_state['nav_radio']
-
-# [수정] 현재 탭에 맞는 인덱스 계산
-try:
-    current_tab_idx = MENU_OPTIONS.index(st.session_state['current_tab'])
-except:
-    current_tab_idx = 0
-    st.session_state['current_tab'] = MENU_OPTIONS[0]
-
-# [수정] 네비게이션 (라디오 버튼을 탭처럼 사용, index 파라미터로 제어)
+# 네비게이션 (라디오 버튼)
+# index 옵션을 제거하고 key만 사용하여 session_state 값에 전적으로 의존하게 함
 selected_tab = st.radio(
     "메뉴 이동", 
     MENU_OPTIONS, 
-    index=current_tab_idx,
     horizontal=True, 
     label_visibility="collapsed",
-    key="nav_radio", # 키 변경 (충돌 방지)
-    on_change=on_tab_change
+    key="nav_menu" # 이 Key가 네비게이션의 핵심 상태입니다.
 )
 
 # --- TAB 1: 수입진행상황 ---
-if st.session_state['current_tab'] == MENU_OPTIONS[0]:
+if selected_tab == MENU_OPTIONS[0]:
     st.markdown("### 📅 수입 진행 현황판")
     df = get_schedule_data('import_schedules', 'ALL')
     if df.empty:
@@ -624,18 +612,16 @@ if st.session_state['current_tab'] == MENU_OPTIONS[0]:
         st.markdown(html_content, unsafe_allow_html=True)
 
 # --- TAB 2: 수입장부 (상세) ---
-elif st.session_state['current_tab'] == MENU_OPTIONS[1]:
+elif selected_tab == MENU_OPTIONS[1]:
     st.markdown("### 📒 수입장부 상세 내역")
     st.info("💡 행을 클릭하면 해당 건의 수정(등록/관리) 페이지로 이동합니다.")
     
     df_ledger = get_schedule_data('import_schedules', 'ALL')
     
     if not df_ledger.empty:
-        # 삼각무역 태그 표시
         if 'tri_cnt' in df_ledger.columns:
             df_ledger.insert(0, '구분', df_ledger['tri_cnt'].apply(lambda x: '삼각' if x > 0 else ''))
         
-        # 선택 기능 활성화
         event = st.dataframe(
             df_ledger, 
             use_container_width=True, 
@@ -643,33 +629,28 @@ elif st.session_state['current_tab'] == MENU_OPTIONS[1]:
             hide_index=True,
             on_select="rerun",
             selection_mode="single-row",
-            key="ledger_df" # 키 추가
+            key="ledger_df"
         )
         
-        # 선택 시 이동 로직
         if len(event.selection.rows) > 0:
             selected_idx = event.selection.rows[0]
-            # df_ledger는 이미 정렬되어 있을 수 있으므로 iloc으로 정확한 행 가져옴
             selected_row = df_ledger.iloc[selected_idx].to_dict()
             
-            # 수정 모드로 데이터 세팅
             st.session_state['edit_mode'] = 'edit'
             st.session_state['selected_data'] = selected_row
-            
-            # JSON 필드 로드
             try: st.session_state['clearance_list'] = json.loads(selected_row.get('clearance_info')) if selected_row.get('clearance_info') else []
             except: st.session_state['clearance_list'] = []
             try: st.session_state['declaration_list'] = json.loads(selected_row.get('declaration_info')) if selected_row.get('declaration_info') else []
             except: st.session_state['declaration_list'] = []
             
-            # 탭 이동 (session_state 업데이트 후 rerun)
-            st.session_state['current_tab'] = MENU_OPTIONS[4] # "📝 수입 등록/관리"
+            # [핵심 수정] 네비게이션 키 값을 직접 변경하여 탭 이동 강제
+            st.session_state['nav_menu'] = MENU_OPTIONS[4] # "📝 수입 등록/관리"
             st.rerun()
             
     else: st.info("데이터가 없습니다.")
 
 # --- TAB 3: 수출 (Export) - Editable ---
-elif st.session_state['current_tab'] == MENU_OPTIONS[2]:
+elif selected_tab == MENU_OPTIONS[2]:
     st.markdown("### 📤 수출 장부 (직접 입력 가능)")
     st.info("💡 엑셀처럼 셀을 더블클릭하여 내용을 수정하세요. '수출자(수입자)' 칸은 바이어 정보를 입력하면 됩니다.")
     
@@ -724,7 +705,7 @@ elif st.session_state['current_tab'] == MENU_OPTIONS[2]:
     else: st.warning("등록된 수출 건이 없습니다.")
 
 # --- TAB 4: 삼각무역 (Triangular) - Tag Management ---
-elif st.session_state['current_tab'] == MENU_OPTIONS[3]:
+elif selected_tab == MENU_OPTIONS[3]:
     st.markdown("### 📐 삼각무역 (부가 정보 관리)")
     st.markdown("기존 수입 건에 **삼각무역 관련 부가 정보(Tag)**를 연결하여 관리합니다.")
     
@@ -762,7 +743,7 @@ elif st.session_state['current_tab'] == MENU_OPTIONS[3]:
             with st.form("add_tri_tag_form"):
                 st.caption(f"이 수입 건에 대한 부가 정보를 {action_txt}합니다.")
                 
-                # 값 초기화 로직: 기존 데이터가 있으면 사용, 없으면 Import 데이터(일부) 혹은 빈 값
+                # 값 초기화 로직
                 val_importer = existing_data.get('importer', '') if existing_data else ''
                 val_size = existing_data.get('size', '') if existing_data else ''
                 val_packing = existing_data.get('packing', '') if existing_data else ''
@@ -781,7 +762,6 @@ elif st.session_state['current_tab'] == MENU_OPTIONS[3]:
                 val_pay_amt = float(existing_data.get('payment_amount', 0)) if existing_data else 0.0
                 val_ex_rate = float(existing_data.get('exchange_rate', 0)) if existing_data else 0.0
 
-                # 자동 입력 필드 (DB저장용) - 수정 시에도 변경되지 않음
                 c1, c2, c3 = st.columns(3)
                 in_ck = c1.text_input("CK관리번호 (자동)", value=target_row.get('ck_code') or '', disabled=True)
                 in_og = c2.text_input("원산지 (자동)", value=target_row.get('origin') or '', disabled=True)
@@ -828,7 +808,7 @@ elif st.session_state['current_tab'] == MENU_OPTIONS[3]:
                     else: st.error(f"오류: {msg}")
 
 # --- TAB 5: 등록 및 관리 (복원됨) ---
-elif st.session_state['current_tab'] == MENU_OPTIONS[4]:
+elif selected_tab == MENU_OPTIONS[4]:
     col_list, col_form = st.columns([1, 2])
     
     with col_list:
@@ -1086,7 +1066,7 @@ elif st.session_state['current_tab'] == MENU_OPTIONS[4]:
                             st.rerun()
 
 # --- TAB 6: 품목 관리 ---
-elif st.session_state['current_tab'] == MENU_OPTIONS[5]:
+elif selected_tab == MENU_OPTIONS[5]:
     st.markdown("### 📦 시스템 품목 관리")
     col_p1, col_p2 = st.columns([1, 2])
     with col_p1:
