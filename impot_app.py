@@ -156,8 +156,13 @@ def register_new_product(code, name, cat, unit):
 def get_schedule_data(table_name='import_schedules', status_filter='ALL'):
     """데이터 조회 (수입/수출 공용)"""
     with conn.session as s:
+        # 수입인 경우 삼각무역 태그 존재 여부 확인
+        extra_col = ""
+        if table_name == 'import_schedules':
+            extra_col = ", (SELECT COUNT(*) FROM triangular_trades WHERE import_id = s.id) as tri_cnt"
+
         base_sql = f"""
-            SELECT s.*, p.product_name, p.product_code as db_prod_code, p.unit as p_unit
+            SELECT s.*, p.product_name, p.product_code as db_prod_code, p.unit as p_unit{extra_col}
             FROM {table_name} s
             LEFT JOIN products p ON s.product_id = p.product_id
         """
@@ -579,6 +584,10 @@ with tab_ledger:
     st.markdown("### 📒 수입장부 상세 내역")
     df_ledger = get_schedule_data('import_schedules', 'ALL')
     if not df_ledger.empty:
+        # 삼각무역 태그 표시 (tri_cnt > 0 이면 '삼각' 표시)
+        if 'tri_cnt' in df_ledger.columns:
+            df_ledger.insert(0, '구분', df_ledger['tri_cnt'].apply(lambda x: '삼각' if x > 0 else ''))
+        
         st.dataframe(df_ledger, use_container_width=True, height=600, hide_index=True)
     else: st.info("데이터가 없습니다.")
 
