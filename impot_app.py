@@ -333,8 +333,11 @@ def get_triangular_trades(import_id):
             return df
     except Exception: return pd.DataFrame()
 
-def save_triangular_trade(data):
-    """삼각무역 태그 저장 (INSERT)"""
+def save_triangular_trade(data, target_id=None):
+    """
+    삼각무역 태그 저장 (INSERT or UPDATE)
+    target_id가 있으면 UPDATE, 없으면 INSERT (단일 태그 관리)
+    """
     try:
         with conn.session as s:
             cols = ['import_id', 'ck_code', 'importer', 'origin', 'product_name', 'size', 'packing', 
@@ -351,12 +354,22 @@ def save_triangular_trade(data):
                 else:
                     params[k] = val if val else None
 
-            # 항상 INSERT (태그 추가 개념)
-            col_str = ", ".join(cols)
-            val_str = ", ".join([f":{c}" for c in cols])
-            s.execute(text(f"INSERT INTO triangular_trades ({col_str}) VALUES ({val_str})"), params)
+            if target_id:
+                # Update
+                set_clause = ", ".join([f"{c} = :{c}" for c in cols])
+                sql = f"UPDATE triangular_trades SET {set_clause} WHERE id = :id"
+                params['id'] = target_id
+                s.execute(text(sql), params)
+                msg = "수정 완료"
+            else:
+                # Insert
+                col_str = ", ".join(cols)
+                val_str = ", ".join([f":{c}" for c in cols])
+                s.execute(text(f"INSERT INTO triangular_trades ({col_str}) VALUES ({val_str})"), params)
+                msg = "등록 완료"
+                
             s.commit()
-        return True, "삼각무역 정보 추가 완료"
+        return True, msg
     except Exception as e: return False, str(e)
 
 def delete_triangular_trade(tid):
@@ -651,48 +664,64 @@ with tab_triangular:
             c2.info(f"**원산지**: {target_row.get('origin') or '-'}")
             c3.info(f"**품명**: {target_row.get('product_name')}")
 
-            st.markdown("#### 3. 연결된 삼각무역 정보 (목록)")
+            # 기존 삼각무역 태그 조회 (단일 건)
             tri_df = get_triangular_trades(selected_imp_id)
+            existing_data = None
             if not tri_df.empty:
-                st.dataframe(tri_df, use_container_width=True, hide_index=True)
-                # 간단 삭제 UI
-                del_tid = st.selectbox("삭제할 태그 ID 선택", tri_df['id'], key="del_tri_sel")
-                if st.button("🗑️ 선택한 태그 삭제"):
-                    delete_triangular_trade(del_tid)
-                    st.rerun()
-            else:
-                st.caption("아직 연결된 정보가 없습니다.")
+                existing_data = tri_df.iloc[0].to_dict()
 
-            st.markdown("#### 4. 신규 정보 추가 (Tag)")
+            action_txt = "수정" if existing_data else "등록"
+            st.markdown(f"#### 3. 삼각무역 부가 정보 ({action_txt})")
+            
             with st.form("add_tri_tag_form"):
-                st.caption("아래 정보를 입력하여 해당 수입 건에 꼬리표를 붙입니다.")
-                # 자동 입력되는 필드 (Read-only 처럼 표시하지만 DB저장을 위해 value 할당)
+                st.caption(f"이 수입 건에 대한 부가 정보를 {action_txt}합니다.")
+                
+                # 값 초기화 로직: 기존 데이터가 있으면 사용, 없으면 Import 데이터(일부) 혹은 빈 값
+                val_importer = existing_data.get('importer', '') if existing_data else ''
+                val_size = existing_data.get('size', '') if existing_data else ''
+                val_packing = existing_data.get('packing', '') if existing_data else ''
+                
+                val_qty = float(existing_data.get('open_qty', 0)) if existing_data else 0.0
+                val_unit = existing_data.get('unit', '') if existing_data else ''
+                val_amt = float(existing_data.get('open_amount', 0)) if existing_data else 0.0
+                
+                val_inv = existing_data.get('invoice_no', '') if existing_data else ''
+                val_eta = safe_date_parse(existing_data.get('eta')) if existing_data and existing_data.get('eta') else None
+                if val_eta: val_eta = datetime.strptime(val_eta, '%Y-%m-%d')
+                
+                val_pay_dt = safe_date_parse(existing_data.get('payment_date')) if existing_data and existing_data.get('payment_date') else None
+                if val_pay_dt: val_pay_dt = datetime.strptime(val_pay_dt, '%Y-%m-%d')
+                
+                val_pay_amt = float(existing_data.get('payment_amount', 0)) if existing_data else 0.0
+                val_ex_rate = float(existing_data.get('exchange_rate', 0)) if existing_data else 0.0
+
+                # 자동 입력 필드 (DB저장용) - 수정 시에도 변경되지 않음
                 c1, c2, c3 = st.columns(3)
                 in_ck = c1.text_input("CK관리번호 (자동)", value=target_row.get('ck_code') or '', disabled=True)
                 in_og = c2.text_input("원산지 (자동)", value=target_row.get('origin') or '', disabled=True)
                 in_pn = c3.text_input("품명 (자동)", value=target_row.get('product_name') or '', disabled=True)
 
                 c1, c2, c3 = st.columns(3)
-                in_importer = c1.text_input("수입자", placeholder="Buyer 입력")
-                in_size = c2.text_input("사이즈")
-                in_packing = c3.text_input("Packing")
+                in_importer = c1.text_input("수입자", value=val_importer, placeholder="Buyer 입력")
+                in_size = c2.text_input("사이즈", value=val_size)
+                in_packing = c3.text_input("Packing", value=val_packing)
                 
                 c1, c2, c3 = st.columns(3)
-                in_qty = c1.number_input("오픈수량", value=0.0)
-                in_unit = c2.text_input("단위")
-                in_amt = c3.number_input("오픈금액", value=0.0)
+                in_qty = c1.number_input("오픈수량", value=val_qty)
+                in_unit = c2.text_input("단위", value=val_unit)
+                in_amt = c3.number_input("오픈금액", value=val_amt)
                 
                 c1, c2 = st.columns(2)
-                in_inv = c1.text_input("Invoice No.")
-                in_eta = c2.date_input("ETA", value=None)
+                in_inv = c1.text_input("Invoice No.", value=val_inv)
+                in_eta = c2.date_input("ETA", value=val_eta)
                 
                 c1, c2, c3 = st.columns(3)
-                in_pay_dt = c1.date_input("결제일", value=None)
-                in_pay_amt = c2.number_input("결제금액", value=0.0)
-                in_ex_rate = c3.number_input("환율", value=0.0)
+                in_pay_dt = c1.date_input("결제일", value=val_pay_dt)
+                in_pay_amt = c2.number_input("결제금액", value=val_pay_amt)
+                in_ex_rate = c3.number_input("환율", value=val_ex_rate)
 
-                if st.form_submit_button("➕ 정보 추가 (Tag)"):
-                    new_tag = {
+                if st.form_submit_button(f"💾 정보 {action_txt} (Tag)"):
+                    save_data = {
                         'import_id': selected_imp_id,
                         'ck_code': target_row.get('ck_code'),
                         'origin': target_row.get('origin'),
@@ -703,7 +732,9 @@ with tab_triangular:
                         'invoice_no': in_inv, 'eta': in_eta,
                         'payment_date': in_pay_dt, 'payment_amount': in_pay_amt, 'exchange_rate': in_ex_rate
                     }
-                    ok, msg = save_triangular_trade(new_tag)
+                    
+                    tid = existing_data['id'] if existing_data else None
+                    ok, msg = save_triangular_trade(save_data, tid)
                     if ok:
                         st.success(msg)
                         time.sleep(1)
