@@ -582,17 +582,30 @@ MENU_OPTIONS = [
 if 'current_tab' not in st.session_state:
     st.session_state['current_tab'] = MENU_OPTIONS[0]
 
-# 네비게이션 (라디오 버튼을 탭처럼 사용)
+# [수정] 탭 변경 콜백 함수 (사용자가 라디오 버튼을 직접 클릭했을 때)
+def on_tab_change():
+    st.session_state['current_tab'] = st.session_state['nav_radio']
+
+# [수정] 현재 탭에 맞는 인덱스 계산
+try:
+    current_tab_idx = MENU_OPTIONS.index(st.session_state['current_tab'])
+except:
+    current_tab_idx = 0
+    st.session_state['current_tab'] = MENU_OPTIONS[0]
+
+# [수정] 네비게이션 (라디오 버튼을 탭처럼 사용, index 파라미터로 제어)
 selected_tab = st.radio(
     "메뉴 이동", 
     MENU_OPTIONS, 
+    index=current_tab_idx,
     horizontal=True, 
     label_visibility="collapsed",
-    key="current_tab" # session_state와 자동 연동
+    key="nav_radio", # 키 변경 (충돌 방지)
+    on_change=on_tab_change
 )
 
 # --- TAB 1: 수입진행상황 ---
-if selected_tab == MENU_OPTIONS[0]:
+if st.session_state['current_tab'] == MENU_OPTIONS[0]:
     st.markdown("### 📅 수입 진행 현황판")
     df = get_schedule_data('import_schedules', 'ALL')
     if df.empty:
@@ -611,7 +624,7 @@ if selected_tab == MENU_OPTIONS[0]:
         st.markdown(html_content, unsafe_allow_html=True)
 
 # --- TAB 2: 수입장부 (상세) ---
-elif selected_tab == MENU_OPTIONS[1]:
+elif st.session_state['current_tab'] == MENU_OPTIONS[1]:
     st.markdown("### 📒 수입장부 상세 내역")
     st.info("💡 행을 클릭하면 해당 건의 수정(등록/관리) 페이지로 이동합니다.")
     
@@ -629,7 +642,8 @@ elif selected_tab == MENU_OPTIONS[1]:
             height=600, 
             hide_index=True,
             on_select="rerun",
-            selection_mode="single-row"
+            selection_mode="single-row",
+            key="ledger_df" # 키 추가
         )
         
         # 선택 시 이동 로직
@@ -655,7 +669,7 @@ elif selected_tab == MENU_OPTIONS[1]:
     else: st.info("데이터가 없습니다.")
 
 # --- TAB 3: 수출 (Export) - Editable ---
-elif selected_tab == MENU_OPTIONS[2]:
+elif st.session_state['current_tab'] == MENU_OPTIONS[2]:
     st.markdown("### 📤 수출 장부 (직접 입력 가능)")
     st.info("💡 엑셀처럼 셀을 더블클릭하여 내용을 수정하세요. '수출자(수입자)' 칸은 바이어 정보를 입력하면 됩니다.")
     
@@ -710,7 +724,7 @@ elif selected_tab == MENU_OPTIONS[2]:
     else: st.warning("등록된 수출 건이 없습니다.")
 
 # --- TAB 4: 삼각무역 (Triangular) - Tag Management ---
-elif selected_tab == MENU_OPTIONS[3]:
+elif st.session_state['current_tab'] == MENU_OPTIONS[3]:
     st.markdown("### 📐 삼각무역 (부가 정보 관리)")
     st.markdown("기존 수입 건에 **삼각무역 관련 부가 정보(Tag)**를 연결하여 관리합니다.")
     
@@ -814,7 +828,7 @@ elif selected_tab == MENU_OPTIONS[3]:
                     else: st.error(f"오류: {msg}")
 
 # --- TAB 5: 등록 및 관리 (복원됨) ---
-elif selected_tab == MENU_OPTIONS[4]:
+elif st.session_state['current_tab'] == MENU_OPTIONS[4]:
     col_list, col_form = st.columns([1, 2])
     
     with col_list:
@@ -1072,7 +1086,7 @@ elif selected_tab == MENU_OPTIONS[4]:
                             st.rerun()
 
 # --- TAB 6: 품목 관리 ---
-elif selected_tab == MENU_OPTIONS[5]:
+elif st.session_state['current_tab'] == MENU_OPTIONS[5]:
     st.markdown("### 📦 시스템 품목 관리")
     col_p1, col_p2 = st.columns([1, 2])
     with col_p1:
