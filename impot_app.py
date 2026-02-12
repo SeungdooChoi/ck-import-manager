@@ -53,6 +53,18 @@ st.markdown("""
     
     /* 데이터프레임 스타일 */
     .stDataFrame { font-size: 13px; }
+    
+    /* 라디오 버튼을 탭처럼 스타일링 */
+    div[role="radiogroup"] > label > div:first-of-type {
+        display: none;
+    }
+    div[role="radiogroup"] {
+        flex-direction: row;
+        gap: 10px;
+        border-bottom: 1px solid #dee2e6;
+        padding-bottom: 5px;
+        margin-bottom: 15px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -551,17 +563,36 @@ def parse_import_full_excel(df):
     return valid_data, errors
 
 # ==========================================
-# 2. 메인 UI 구성
+# 2. 메인 UI 구성 (st.radio로 탭 대체)
 # ==========================================
 
 st.title("🚢 수입/수출 통합 관리 시스템")
 
-tab_status, tab_ledger, tab_export, tab_triangular, tab_manage, tab_product = st.tabs([
-    "📊 수입진행상황", "📒 수입장부 (상세)", "📤 수출 (Export)", "tj 삼각무역 (Triangular)", "📝 수입 등록/관리", "📦 품목 관리"
-])
+# 탭 메뉴 정의
+MENU_OPTIONS = [
+    "📊 수입진행상황", 
+    "📒 수입장부 (상세)", 
+    "📤 수출 (Export)", 
+    "tj 삼각무역 (Triangular)", 
+    "📝 수입 등록/관리", 
+    "📦 품목 관리"
+]
+
+# 세션 스테이트 초기화 (현재 탭)
+if 'current_tab' not in st.session_state:
+    st.session_state['current_tab'] = MENU_OPTIONS[0]
+
+# 네비게이션 (라디오 버튼을 탭처럼 사용)
+selected_tab = st.radio(
+    "메뉴 이동", 
+    MENU_OPTIONS, 
+    horizontal=True, 
+    label_visibility="collapsed",
+    key="current_tab" # session_state와 자동 연동
+)
 
 # --- TAB 1: 수입진행상황 ---
-with tab_status:
+if selected_tab == MENU_OPTIONS[0]:
     st.markdown("### 📅 수입 진행 현황판")
     df = get_schedule_data('import_schedules', 'ALL')
     if df.empty:
@@ -580,19 +611,51 @@ with tab_status:
         st.markdown(html_content, unsafe_allow_html=True)
 
 # --- TAB 2: 수입장부 (상세) ---
-with tab_ledger:
+elif selected_tab == MENU_OPTIONS[1]:
     st.markdown("### 📒 수입장부 상세 내역")
+    st.info("💡 행을 클릭하면 해당 건의 수정(등록/관리) 페이지로 이동합니다.")
+    
     df_ledger = get_schedule_data('import_schedules', 'ALL')
+    
     if not df_ledger.empty:
-        # 삼각무역 태그 표시 (tri_cnt > 0 이면 '삼각' 표시)
+        # 삼각무역 태그 표시
         if 'tri_cnt' in df_ledger.columns:
             df_ledger.insert(0, '구분', df_ledger['tri_cnt'].apply(lambda x: '삼각' if x > 0 else ''))
         
-        st.dataframe(df_ledger, use_container_width=True, height=600, hide_index=True)
+        # 선택 기능 활성화
+        event = st.dataframe(
+            df_ledger, 
+            use_container_width=True, 
+            height=600, 
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row"
+        )
+        
+        # 선택 시 이동 로직
+        if len(event.selection.rows) > 0:
+            selected_idx = event.selection.rows[0]
+            # df_ledger는 이미 정렬되어 있을 수 있으므로 iloc으로 정확한 행 가져옴
+            selected_row = df_ledger.iloc[selected_idx].to_dict()
+            
+            # 수정 모드로 데이터 세팅
+            st.session_state['edit_mode'] = 'edit'
+            st.session_state['selected_data'] = selected_row
+            
+            # JSON 필드 로드
+            try: st.session_state['clearance_list'] = json.loads(selected_row.get('clearance_info')) if selected_row.get('clearance_info') else []
+            except: st.session_state['clearance_list'] = []
+            try: st.session_state['declaration_list'] = json.loads(selected_row.get('declaration_info')) if selected_row.get('declaration_info') else []
+            except: st.session_state['declaration_list'] = []
+            
+            # 탭 이동 (session_state 업데이트 후 rerun)
+            st.session_state['current_tab'] = MENU_OPTIONS[4] # "📝 수입 등록/관리"
+            st.rerun()
+            
     else: st.info("데이터가 없습니다.")
 
 # --- TAB 3: 수출 (Export) - Editable ---
-with tab_export:
+elif selected_tab == MENU_OPTIONS[2]:
     st.markdown("### 📤 수출 장부 (직접 입력 가능)")
     st.info("💡 엑셀처럼 셀을 더블클릭하여 내용을 수정하세요. '수출자(수입자)' 칸은 바이어 정보를 입력하면 됩니다.")
     
@@ -647,7 +710,7 @@ with tab_export:
     else: st.warning("등록된 수출 건이 없습니다.")
 
 # --- TAB 4: 삼각무역 (Triangular) - Tag Management ---
-with tab_triangular:
+elif selected_tab == MENU_OPTIONS[3]:
     st.markdown("### 📐 삼각무역 (부가 정보 관리)")
     st.markdown("기존 수입 건에 **삼각무역 관련 부가 정보(Tag)**를 연결하여 관리합니다.")
     
@@ -751,7 +814,7 @@ with tab_triangular:
                     else: st.error(f"오류: {msg}")
 
 # --- TAB 5: 등록 및 관리 (복원됨) ---
-with tab_manage:
+elif selected_tab == MENU_OPTIONS[4]:
     col_list, col_form = st.columns([1, 2])
     
     with col_list:
@@ -1009,7 +1072,7 @@ with tab_manage:
                             st.rerun()
 
 # --- TAB 6: 품목 관리 ---
-with tab_product:
+elif selected_tab == MENU_OPTIONS[5]:
     st.markdown("### 📦 시스템 품목 관리")
     col_p1, col_p2 = st.columns([1, 2])
     with col_p1:
