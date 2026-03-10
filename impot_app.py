@@ -578,40 +578,147 @@ MENU_OPTIONS = [
     "📦 품목 관리"
 ]
 
-# 네비게이션 초기화 (Key가 Single Source of Truth)
-if 'nav_menu' not in st.session_state:
-    st.session_state['nav_menu'] = MENU_OPTIONS[0]
+# [핵심] 네비게이션 상태 분리 (active_tab: 논리적 탭 / nav_radio: 위젯 키)
+if 'active_tab' not in st.session_state:
+    st.session_state['active_tab'] = MENU_OPTIONS[0]
+
+# 탭 변경 콜백 (위젯 -> 상태 동기화)
+def on_tab_change():
+    st.session_state['active_tab'] = st.session_state['nav_radio']
+
+# 현재 상태에 맞는 인덱스 계산
+try:
+    current_idx = MENU_OPTIONS.index(st.session_state['active_tab'])
+except:
+    current_idx = 0
+    st.session_state['active_tab'] = MENU_OPTIONS[0]
 
 # [중요] 데이터프레임 선택 초기화용 키
 if 'df_key_tracker' not in st.session_state:
     st.session_state['df_key_tracker'] = 0
 
 # 네비게이션 (라디오 버튼)
-selected_tab = st.radio(
+selected_tab_val = st.radio(
     "메뉴 이동", 
     MENU_OPTIONS, 
+    index=current_idx,
     horizontal=True, 
     label_visibility="collapsed",
-    key="nav_menu" 
+    key="nav_radio", 
+    on_change=on_tab_change
 )
+
+# 실제 뷰는 논리적 상태(active_tab)를 따름
+selected_tab = st.session_state['active_tab']
 
 # --- TAB 1: 수입진행상황 ---
 if selected_tab == MENU_OPTIONS[0]:
     st.markdown("### 📅 수입 진행 현황판")
+    
+    # 피벗 스타일 테이블 CSS
+    st.markdown("""
+    <style>
+        .progress-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 30px; }
+        .progress-table th, .progress-table td { border: 1px solid #adb5bd; text-align: center; vertical-align: middle; }
+        .progress-table th { background-color: #f1f3f5; font-weight: bold; padding: 8px; color: #343a40; }
+        .progress-table td { padding: 4px; }
+        .progress-table .prod-cell { font-weight: bold; background-color: #f8f9fa; text-align: center; }
+        .progress-table .size-cell { background-color: #f8f9fa; }
+        .progress-table .date-cell { font-weight: bold; font-size: 12px; border-bottom: 1px dotted #ced4da; }
+        .progress-table .qty-cell { font-weight: normal; color: #495057; }
+        
+        /* 상태별 배경색 (스크린샷 참고) */
+        .cell-pending { background-color: #fff3bf !important; } /* 노란색 (진행중) */
+        .cell-arrived { background-color: #3bc9db !important; color: white; } /* 파란색 (입고완료) */
+        .cell-default { background-color: #ffffff !important; }
+    </style>
+    """, unsafe_allow_html=True)
+    
     df = get_schedule_data('import_schedules', 'ALL')
+    
     if df.empty:
         st.info("등록된 수입 일정이 없습니다.")
     else:
-        df['eta_str'] = pd.to_datetime(df['expected_date']).dt.strftime('%y/%m/%d')
-        grouped = df.groupby('eta_str', sort=False)
-        html_content = """<table style="width:100%; border-collapse: collapse; font-size:13px; text-align:center;"><thead><tr style="background-color:#f8f9fa; border-bottom:2px solid #dee2e6;"><th style="padding:10px;">입항일</th><th style="padding:10px;">공급사</th><th style="padding:10px;">품명</th><th style="padding:10px;">CK</th><th style="padding:10px;">사이즈</th><th style="padding:10px;">단가</th><th style="padding:10px;">수량</th><th style="padding:10px;">상태</th></tr></thead><tbody>"""
-        for date_str, group in grouped:
-            html_content += f"""<tr style="background-color:#e7f5ff; border-top:1px solid #dee2e6; border-bottom:1px solid #dee2e6;"><td colspan="8" style="padding:8px; font-weight:bold; text-align:left; padding-left:15px; color:#495057;">📅 {date_str} (총 {len(group)}건)</td></tr>"""
-            for _, row in group.iterrows():
-                status_cls = "status-pending" if row['status'] == 'PENDING' else ("status-arrived" if row['status'] == 'ARRIVED' else "status-canceled")
-                status_txt = "진행중" if row['status'] == 'PENDING' else ("입고완료" if row['status'] == 'ARRIVED' else "취소")
-                html_content += f"""<tr style="border-bottom:1px solid #f1f3f5; height: 40px;"><td style="color:#868e96;">{date_str}</td><td>{row['supplier'] or '-'}</td><td style="font-weight:bold; color:#343a40;">{row['product_name']}</td><td style="font-family:monospace; color:#495057;">{row['ck_code'] or '-'}</td><td>{row['size'] or '-'}</td><td>${float(row['unit_price'] or 0):.2f}</td><td style="font-weight:bold; color:#1c7ed6;">{int(row['quantity'] or 0):,}</td><td><span class="status-badge {status_cls}">{status_txt}</span></td></tr>"""
-        html_content += "</tbody></table>"
+        # CANCELED(취소) 건은 현황판에서 제외
+        df = df[df['status'] != 'CANCELED']
+        
+        # 착지(destination) 빈 값 처리
+        df['destination'] = df['destination'].fillna('기본 착지').replace('', '기본 착지')
+        
+        html_content = ""
+        
+        # 1. 착지(Destination) 별로 먼저 그룹화
+        dest_groups = df.groupby('destination', dropna=False)
+        
+        for dest, d_group in dest_groups:
+            dest_str = str(dest).strip()
+            
+            # 2. 품명, 사이즈로 그룹화
+            prod_groups = d_group.groupby(['product_name', 'size'], dropna=False)
+            
+            # 테이블 레이아웃을 안 깨지게 하기 위해 가장 스케줄이 많은 건수 계산 (최소 5칸 확보)
+            max_cols = prod_groups.size().max()
+            if pd.isna(max_cols) or max_cols < 5: 
+                max_cols = 5
+            
+            html_content += f"<table class='progress-table'>"
+            
+            # 여러 착지가 있거나 명시된 경우 하위 그룹 헤더(착지명) 추가
+            if dest_str != '기본 착지' or len(dest_groups) > 1:
+                html_content += f"<thead><tr><th colspan='{max_cols + 2}' style='background-color:#e9ecef; text-align:center; font-size: 14px;'>착지 : {dest_str}</th></tr></thead>"
+            
+            html_content += f"""
+              <thead>
+                <tr>
+                  <th style="width: 18%;">품명</th>
+                  <th style="width: 12%;">사이즈</th>
+                  <th colspan="{max_cols}">입고일 (ETA) / 수량</th>
+                </tr>
+              </thead>
+              <tbody>
+            """
+            
+            # 각 품목/사이즈 별로 행(Row) 생성
+            for (p_name, size), p_group in prod_groups:
+                # 날짜순 정렬
+                p_group = p_group.sort_values(by='expected_date')
+                
+                p_name_str = p_name if pd.notna(p_name) and str(p_name).strip() != '' else '-'
+                size_str = size if pd.notna(size) and str(size).strip() != '' else '-'
+                
+                date_cells = ""
+                qty_cells = ""
+                
+                # 가로로 나열될 날짜 및 수량 셀 생성
+                for _, row in p_group.iterrows():
+                    eta = pd.to_datetime(row['expected_date']).strftime('%y/%m/%d') if pd.notna(row['expected_date']) else '-'
+                    qty = f"{int(row['quantity']):,}" if pd.notna(row['quantity']) else "0"
+                    status = row['status']
+                    
+                    # 상태에 따른 배경색 클래스 할당
+                    bg_class = "cell-default"
+                    if status == 'PENDING':
+                        bg_class = "cell-pending"
+                    elif status == 'ARRIVED':
+                        bg_class = "cell-arrived"
+                        
+                    date_cells += f"<td class='date-cell {bg_class}'>{eta}</td>"
+                    qty_cells += f"<td class='qty-cell {bg_class}'>{qty}</td>"
+                
+                # 빈 칸 채우기 (테이블 레이아웃 유지용)
+                empty_cols = max_cols - len(p_group)
+                for _ in range(empty_cols):
+                    date_cells += "<td class='date-cell cell-default'></td>"
+                    qty_cells += "<td class='qty-cell cell-default'></td>"
+                
+                # 2줄을 묶어서 하나의 품목 행으로 렌더링 (날짜 줄, 수량 줄)
+                tr1 = f"<tr><td rowspan='2' class='prod-cell'>{p_name_str}</td><td rowspan='2' class='size-cell'>{size_str}</td>{date_cells}</tr>"
+                tr2 = f"<tr>{qty_cells}</tr>"
+                
+                html_content += tr1 + tr2
+                
+            html_content += "</tbody></table>"
+            
         st.markdown(html_content, unsafe_allow_html=True)
 
 # --- TAB 2: 수입장부 (상세) ---
@@ -649,8 +756,8 @@ elif selected_tab == MENU_OPTIONS[1]:
             try: st.session_state['declaration_list'] = json.loads(selected_row.get('declaration_info')) if selected_row.get('declaration_info') else []
             except: st.session_state['declaration_list'] = []
             
-            # [핵심 수정] 탭 이동 및 데이터프레임 키 변경(다음 렌더링 시 선택 초기화)
-            st.session_state['nav_menu'] = MENU_OPTIONS[4] # "📝 수입 등록/관리"
+            # [핵심 수정] 상태 변수를 변경하고 리런하여 라디오 버튼 인덱스 재계산 유도
+            st.session_state['active_tab'] = MENU_OPTIONS[4] # "📝 수입 등록/관리"
             st.session_state['df_key_tracker'] += 1
             st.rerun()
             
