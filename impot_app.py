@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import pytz
 import re
 import io
 import json
+import uuid
 
 # ==========================================
 # 0. 기본 설정 및 스타일
@@ -16,6 +17,9 @@ KST = pytz.timezone('Asia/Seoul')
 
 def get_kst_today():
     return datetime.now(KST).date()
+
+def get_kst_now():
+    return datetime.now(KST)
 
 st.markdown("""
 <style>
@@ -135,6 +139,15 @@ try:
                 );
             """))
 
+            # 4. 로그인/접근권한 (재고장 앱과 users 테이블을 공유) — 재고장의 session_token과
+            # 충돌하지 않도록 이 앱 전용 세션 컬럼(import_session_token 등)을 별도로 둔다.
+            try:
+                s.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS import_access BOOLEAN DEFAULT FALSE;"))
+                s.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS import_session_token TEXT;"))
+                s.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS import_session_expiry TIMESTAMP;"))
+            except Exception:
+                pass
+
             s.commit()
         return True
 
@@ -164,6 +177,58 @@ def rollback_session():
     try:
         with conn.session as s: s.rollback()
     except Exception: pass
+
+# --- 로그인 (재고장 앱과 users 테이블 공유, import_access 컬럼으로 접근 허용 여부만 구분) ---
+def check_import_login(input_id, input_name):
+    """사번+이름이 일치하고 import_access가 TRUE인 계정만 로그인 허용"""
+    try:
+        with conn.session as s:
+            row = s.execute(text(
+                "SELECT user_id, username, name, import_access FROM users WHERE username = :uid AND name = :uname"
+            ), {"uid": str(input_id).strip(), "uname": str(input_name).strip()}).fetchone()
+        if not row:
+            return None, "사번 또는 이름이 일치하지 않습니다."
+        if not row[3]:
+            return None, "이 계정은 수입장부 접근 권한이 없습니다. 관리자에게 문의하세요."
+        return {"user_id": row[0], "username": row[1], "name": row[2]}, None
+    except Exception as e:
+        return None, f"로그인 처리 중 오류: {e}"
+
+def start_import_session(user_id):
+    """로그인 성공 시 이 앱 전용 세션 토큰 발급 (재고장의 session_token과는 별개 컬럼)"""
+    token = str(uuid.uuid4())
+    expiry = get_kst_now() + timedelta(hours=8)
+    try:
+        with conn.session as s:
+            s.execute(text("UPDATE users SET import_session_token = :t, import_session_expiry = :e WHERE user_id = :uid"),
+                      {"t": token, "e": expiry, "uid": user_id})
+            s.commit()
+    except Exception:
+        rollback_session()
+    return token
+
+def clear_import_session(user_id):
+    try:
+        with conn.session as s:
+            s.execute(text("UPDATE users SET import_session_token = NULL, import_session_expiry = NULL WHERE user_id = :uid"), {"uid": user_id})
+            s.commit()
+    except Exception:
+        rollback_session()
+
+def try_restore_import_session(token):
+    try:
+        with conn.session as s:
+            row = s.execute(text(
+                "SELECT user_id, username, name, import_session_expiry FROM users WHERE import_session_token = :t AND import_access = TRUE"
+            ), {"t": token}).fetchone()
+        if not row: return None
+        exp = row[3]
+        if exp:
+            if exp.tzinfo is None: exp = KST.localize(exp)
+            if get_kst_now() > exp: return None
+        return {"user_id": row[0], "username": row[1], "name": row[2]}
+    except Exception:
+        return None
 
 def register_new_product(code, name, cat, unit):
     """신규 품목 DB 등록"""
@@ -702,6 +767,50 @@ def parse_import_full_excel(df):
             errors.append(f"[행 {idx+2}] 파싱 오류: {str(e)}")
             
     return valid_data, errors
+
+# ==========================================
+# 1-1. 로그인 게이트
+# ==========================================
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+
+# 새로고침해도 로그인 유지 (URL의 세션 토큰으로 복원)
+if not st.session_state['logged_in']:
+    _token = st.query_params.get("isession")
+    if _token:
+        _restored = try_restore_import_session(_token)
+        if _restored:
+            st.session_state['logged_in'] = True
+            st.session_state['import_user'] = _restored
+
+if not st.session_state['logged_in']:
+    st.title("🚢 수입/수출 통합 관리 시스템")
+    st.markdown("### 🔐 로그인")
+    st.caption("재고장과 동일한 사번/이름을 사용합니다. 접근 권한이 없는 계정은 관리자에게 문의하세요.")
+    with st.form("import_login_form"):
+        c1, c2 = st.columns(2)
+        in_id = c1.text_input("사번")
+        in_name = c2.text_input("이름")
+        if st.form_submit_button("로그인", type="primary", use_container_width=True):
+            user, err = check_import_login(in_id, in_name)
+            if user:
+                token = start_import_session(user['user_id'])
+                st.session_state['logged_in'] = True
+                st.session_state['import_user'] = user
+                st.query_params['isession'] = token
+                st.rerun()
+            else:
+                st.error(err)
+    st.stop()
+
+with st.sidebar:
+    st.success(f"👤 {st.session_state['import_user']['name']}님")
+    if st.button("🚪 로그아웃", use_container_width=True):
+        clear_import_session(st.session_state['import_user']['user_id'])
+        st.session_state['logged_in'] = False
+        st.session_state['import_user'] = None
+        st.query_params.clear()
+        st.rerun()
 
 # ==========================================
 # 2. 메인 UI 구성 (st.radio로 탭 대체 - Key 기반)
