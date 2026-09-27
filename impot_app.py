@@ -88,6 +88,7 @@ try:
             ("balance", "NUMERIC"), ("avg_exchange_rate", "NUMERIC"),
             ("arrival_exchange_rate", "NUMERIC"), # 도착일 환율 (이미지 반영)
             ("clearance_info", "JSONB"), ("declaration_info", "JSONB"),
+            ("remaining_qty", "NUMERIC"), ("transport_status", "TEXT"),
             ("status", "TEXT"), ("product_id", "INTEGER"), ("note", "TEXT"), ("quantity", "NUMERIC"), ("expected_date", "DATE")
         ]
 
@@ -150,6 +151,12 @@ def get_products_df():
     except Exception:
         return pd.DataFrame()
 
+def rollback_session():
+    """DB 오류 발생 시 오염된 트랜잭션을 정리 (실패해도 무시)"""
+    try:
+        with conn.session as s: s.rollback()
+    except Exception: pass
+
 def register_new_product(code, name, cat, unit):
     """신규 품목 DB 등록"""
     try:
@@ -161,9 +168,11 @@ def register_new_product(code, name, cat, unit):
                 VALUES (:code, :name, :cat, :unit, TRUE)
             """), {"code": code, "name": name, "cat": cat, "unit": unit})
             s.commit()
-        get_products_df.clear() 
+        get_products_df.clear()
         return True, "품목 등록 완료"
-    except Exception as e: return False, str(e)
+    except Exception as e:
+        rollback_session()
+        return False, str(e)
 
 def get_schedule_data(table_name='import_schedules', status_filter='ALL'):
     """데이터 조회 (수입/수출 공용)"""
@@ -178,12 +187,14 @@ def get_schedule_data(table_name='import_schedules', status_filter='ALL'):
             FROM {table_name} s
             LEFT JOIN products p ON s.product_id = p.product_id
         """
+        params = {}
         if status_filter != 'ALL':
-            base_sql += f" WHERE s.status = '{status_filter}'"
-        
+            base_sql += " WHERE s.status = :status_filter"
+            params['status_filter'] = status_filter
+
         base_sql += " ORDER BY s.expected_date ASC, s.id DESC"
-        
-        df = pd.DataFrame(s.execute(text(base_sql)).fetchall())
+
+        df = pd.DataFrame(s.execute(text(base_sql), params).fetchall())
         return df
 
 def sync_import_to_inventory(sid):
@@ -259,7 +270,9 @@ def sync_import_to_inventory(sid):
                 s.execute(text("DELETE FROM stock_by_lot WHERE product_id = :pid AND lot_number = :lot AND note LIKE :note AND is_cleared = FALSE"), {"pid": sch['product_id'], "lot": l_no, "note": note_pattern})
                 s.commit()
                 return True, "관련 재고 삭제 완료 (롤백)"
-    except Exception as e: return False, f"동기화 오류: {str(e)}"
+    except Exception as e:
+        rollback_session()
+        return False, f"동기화 오류: {str(e)}"
 
 def save_schedule(data, sid=None, table_name='import_schedules'):
     """상세 정보 저장 (수입/수출 공용)"""
@@ -273,15 +286,28 @@ def save_schedule(data, sid=None, table_name='import_schedules'):
                 'customs_broker_date', 'etd', 'arrival_date', 'warehouse', 'actual_in_qty', 'destination',
                 'doc_acceptance', 'acceptance_rate', 'maturity_date', 'ext_maturity_date', 'acceptance_fee', 'discount_fee',
                 'payment_date', 'payment_amount', 'exchange_rate', 'balance', 'avg_exchange_rate', 'arrival_exchange_rate',
-                'clearance_info', 'declaration_info'
+                'clearance_info', 'declaration_info', 'remaining_qty', 'transport_status'
             ]
-            numeric_cols = ['quantity', 'unit_price', 'open_qty', 'doc_qty', 'box_qty', 'open_amount', 'doc_amount', 
-                            'actual_in_qty', 'acceptance_rate', 'acceptance_fee', 'discount_fee', 'payment_amount', 
-                            'exchange_rate', 'balance', 'avg_exchange_rate', 'arrival_exchange_rate']
+            numeric_cols = ['quantity', 'unit_price', 'open_qty', 'doc_qty', 'box_qty', 'open_amount', 'doc_amount',
+                            'actual_in_qty', 'acceptance_rate', 'acceptance_fee', 'discount_fee', 'payment_amount',
+                            'exchange_rate', 'balance', 'avg_exchange_rate', 'arrival_exchange_rate', 'remaining_qty']
             json_cols = ['clearance_info', 'declaration_info']
 
+            # [중요] data에 실제로 들어있는 컬럼만 갱신한다. 전체 cols를 기준으로 SET하면
+            # (예: 수출 탭에서 셀 하나만 바꿔 보낸 diff) 안 보낸 나머지 컬럼이 전부 0/NULL로 덮어써진다.
+            sid_int = None
+            try: sid_int = int(sid) if sid is not None and str(sid).strip() != '' else None
+            except (TypeError, ValueError): sid_int = None
+
+            use_cols = [c for c in cols if c in data]
+            if sid_int is None and 'status' not in use_cols:
+                data = {**data, 'status': 'PENDING'}
+                use_cols.append('status')
+            if not use_cols:
+                return False, "저장할 변경 내용이 없습니다."
+
             params = {}
-            for k in cols:
+            for k in use_cols:
                 val = data.get(k)
                 if k in numeric_cols:
                     if val is None or str(val).strip() == '': params[k] = 0
@@ -290,27 +316,25 @@ def save_schedule(data, sid=None, table_name='import_schedules'):
                         except: params[k] = 0
                 elif k in json_cols:
                     if isinstance(val, (list, dict)): params[k] = json.dumps(val, ensure_ascii=False)
-                    elif isinstance(val, str) and (val.startswith('[') or val.startswith('{')): params[k] = val 
+                    elif isinstance(val, str) and (val.startswith('[') or val.startswith('{')): params[k] = val
                     else: params[k] = '[]'
                 else:
                     if val is None or str(val).strip() == '' or str(val).lower() == 'nan': params[k] = None
                     else: params[k] = val
-            
-            if not params.get('status'): params['status'] = 'PENDING'
 
             target_id = None
-            if sid:
-                set_clause = ", ".join([f"{c} = CAST(:{c} AS JSONB)" if c in json_cols else f"{c} = :{c}" for c in cols])
-                s.execute(text(f"UPDATE {table_name} SET {set_clause} WHERE id = :id"), {**params, "id": sid})
-                target_id = sid
+            if sid_int is not None:
+                set_clause = ", ".join([f"{c} = CAST(:{c} AS JSONB)" if c in json_cols else f"{c} = :{c}" for c in use_cols])
+                s.execute(text(f"UPDATE {table_name} SET {set_clause} WHERE id = :id"), {**params, "id": sid_int})
+                target_id = sid_int
             else:
-                col_str = ", ".join(cols)
-                val_str = ", ".join([f"CAST(:{c} AS JSONB)" if c in json_cols else f":{c}" for c in cols])
+                col_str = ", ".join(use_cols)
+                val_str = ", ".join([f"CAST(:{c} AS JSONB)" if c in json_cols else f":{c}" for c in use_cols])
                 res = s.execute(text(f"INSERT INTO {table_name} ({col_str}) VALUES ({val_str}) RETURNING id"), params)
                 target_id = res.fetchone()[0]
             s.commit()
 
-        if table_name == 'import_schedules' and params['status'] == 'ARRIVED' and target_id:
+        if table_name == 'import_schedules' and params.get('status') == 'ARRIVED' and target_id:
             ok, msg = sync_import_to_inventory(target_id)
             if not ok:
                 with conn.session as s:
@@ -319,7 +343,9 @@ def save_schedule(data, sid=None, table_name='import_schedules'):
                 return False, f"저장되었으나 재고생성 실패: {msg}"
         
         return True, "저장 완료"
-    except Exception as e: return False, str(e)
+    except Exception as e:
+        rollback_session()
+        return False, str(e)
 
 def delete_schedule(sid, table_name='import_schedules'):
     try:
@@ -327,7 +353,9 @@ def delete_schedule(sid, table_name='import_schedules'):
             s.execute(text(f"DELETE FROM {table_name} WHERE id = :sid"), {"sid": sid})
             s.commit()
         return True, "삭제 완료"
-    except Exception as e: return False, str(e)
+    except Exception as e:
+        rollback_session()
+        return False, str(e)
 
 def save_editor_changes(edited_rows, original_df, table_name='export_schedules'):
     """st.data_editor 변경사항 DB 저장"""
@@ -343,18 +371,31 @@ def save_editor_changes(edited_rows, original_df, table_name='export_schedules')
 
 # --- 삼각무역 전용 함수 ---
 def get_triangular_trades(import_id):
-    """특정 수입 건에 연결된 삼각무역 태그 조회"""
+    """특정 수입 건에 연결된 삼각무역 태그 조회 (건당 여러 개 가능)"""
     try:
         with conn.session as s:
             df = pd.DataFrame(s.execute(text("SELECT * FROM triangular_trades WHERE import_id = :id ORDER BY id"), {"id": import_id}).fetchall())
             return df
     except Exception: return pd.DataFrame()
 
+@st.cache_data(ttl=60)
+def get_all_triangular_trades():
+    """전체 삼각무역 태그 조회 (조회/검색용)"""
+    try:
+        with conn.session as s:
+            df = pd.DataFrame(s.execute(text("""
+                SELECT t.id, t.import_id, t.ck_code, t.origin, t.product_name, t.importer, t.size, t.packing,
+                       t.open_qty, t.unit, t.open_amount, t.invoice_no, t.eta, t.payment_date, t.payment_amount, t.exchange_rate
+                FROM triangular_trades t ORDER BY t.id DESC
+            """)).fetchall())
+            if not df.empty:
+                df.columns = ['ID', '수입ID', 'CK관리번호', '원산지', '품명', '수입자', '사이즈', 'Packing',
+                              '오픈수량', '단위', '오픈금액', 'InvoiceNo', 'ETA', '결제일', '결제금액', '환율']
+            return df
+    except Exception: return pd.DataFrame()
+
 def save_triangular_trade(data, target_id=None):
-    """
-    삼각무역 태그 저장 (INSERT or UPDATE)
-    target_id가 있으면 UPDATE, 없으면 INSERT (단일 태그 관리)
-    """
+    """삼각무역 태그 저장 (INSERT or UPDATE). 하나의 수입 건에 여러 개의 태그를 연결할 수 있다."""
     try:
         with conn.session as s:
             cols = ['import_id', 'ck_code', 'importer', 'origin', 'product_name', 'size', 'packing', 
@@ -386,16 +427,22 @@ def save_triangular_trade(data, target_id=None):
                 msg = "등록 완료"
                 
             s.commit()
+        get_all_triangular_trades.clear()
         return True, msg
-    except Exception as e: return False, str(e)
+    except Exception as e:
+        rollback_session()
+        return False, str(e)
 
 def delete_triangular_trade(tid):
     try:
         with conn.session as s:
             s.execute(text("DELETE FROM triangular_trades WHERE id = :id"), {"id": tid})
             s.commit()
+        get_all_triangular_trades.clear()
         return True, "삭제 완료"
-    except Exception as e: return False, str(e)
+    except Exception as e:
+        rollback_session()
+        return False, str(e)
 
 # --- 유틸리티 ---
 def safe_date_parse(val):
@@ -411,10 +458,46 @@ def safe_date_parse(val):
         return pd.to_datetime(val).strftime('%Y-%m-%d')
     except: return None
 
+def parse_json_field(val):
+    """JSONB 컬럼은 psycopg2가 이미 list/dict로 파싱해서 돌려주므로, 문자열일 때만 json.loads 적용"""
+    if isinstance(val, (list, dict)): return val
+    if isinstance(val, str) and val.strip():
+        try: return json.loads(val)
+        except Exception: return []
+    return []
+
 def safe_float_parse(val):
     if pd.isna(val) or str(val).strip() == '': return 0.0
     try: return float(str(val).replace(',', '').replace(' ', '').strip())
     except: return 0.0
+
+def render_search_filters(df, key_prefix):
+    """업체(공급/수출자) / 품목 / 도착일(ETA) 기준 조회 필터 위젯을 그리고, 필터링된 df를 반환"""
+    if df.empty: return df
+
+    c1, c2, c3, c4 = st.columns(4)
+    supplier_opts = ['전체']
+    if 'supplier' in df.columns:
+        supplier_opts += sorted([str(x) for x in df['supplier'].dropna().unique() if str(x).strip()])
+    product_opts = ['전체']
+    if 'product_name' in df.columns:
+        product_opts += sorted([str(x) for x in df['product_name'].dropna().unique() if str(x).strip()])
+
+    sel_supplier = c1.selectbox("업체", supplier_opts, key=f"{key_prefix}_supplier")
+    sel_product = c2.selectbox("품목", product_opts, key=f"{key_prefix}_product")
+    date_from = c3.date_input("도착일(부터)", value=None, key=f"{key_prefix}_date_from")
+    date_to = c4.date_input("도착일(까지)", value=None, key=f"{key_prefix}_date_to")
+
+    out = df
+    if sel_supplier != '전체' and 'supplier' in out.columns:
+        out = out[out['supplier'].astype(str) == sel_supplier]
+    if sel_product != '전체' and 'product_name' in out.columns:
+        out = out[out['product_name'].astype(str) == sel_product]
+    if 'expected_date' in out.columns and (date_from or date_to):
+        dcol = pd.to_datetime(out['expected_date'], errors='coerce').dt.date
+        if date_from: out = out[dcol.notna() & (dcol >= date_from)]
+        if date_to: out = out[dcol.notna() & (dcol <= date_to)]
+    return out
 
 # --- 엑셀 파싱 함수 (복원) ---
 def parse_import_full_excel(df):
@@ -496,6 +579,36 @@ def parse_import_full_excel(df):
         else: col_map['unit2'] = None
     except: col_map['unit2'] = None
 
+    # 통관(최대 6건)/수입신고(최대 5건) 반복 컬럼은 매번 번호 표기가 달라(통관일자, 통관일자2, ...
+    # 심지어 신고번호처럼 숫자가 어긋나는 경우도 있음) 키워드 매칭 대신 '통관일자' 앵커 위치 기준
+    # 고정 폭(3칸씩 6세트 + 잔량)으로 잘라내고, 그 뒤를 신고정보(2칸씩)로 처리한다.
+    def get_col_by_pos(i):
+        return cols[i] if 0 <= i < len(cols) else None
+
+    clearance_col_groups = []
+    remaining_col = None
+    declaration_col_groups = []
+    try:
+        clr_start = cols.index('통관일자')
+        for i in range(6):
+            base = clr_start + i * 3
+            d_col, q_col, r_col = get_col_by_pos(base), get_col_by_pos(base + 1), get_col_by_pos(base + 2)
+            if d_col is None: break
+            clearance_col_groups.append((d_col, q_col, r_col))
+        remaining_col = get_col_by_pos(clr_start + 18)
+        decl_start = clr_start + 19
+    except ValueError:
+        remaining_col = find_col(['잔량'])
+        decl_start = None
+
+    transport_col = find_col(['운송현황'])
+    if decl_start is not None:
+        transport_idx = cols.index(transport_col) if transport_col in cols else len(cols)
+        i = decl_start
+        while i + 1 < transport_idx and len(declaration_col_groups) < 5:
+            declaration_col_groups.append((cols[i], cols[i + 1]))
+            i += 2
+
     for idx, row in data_df.iterrows():
         if not col_map['name']: continue
         name_val = str(row.get(col_map['name'], '')).strip()
@@ -511,9 +624,19 @@ def parse_import_full_excel(df):
                 col = col_map.get(key)
                 return parser(row.get(col)) if col else (0.0 if parser == safe_float_parse else None)
 
-            # (생략된 통관/신고 파싱 로직 복원)
-            clearance_list = [] # 간단히 처리 (필요시 추가 확장)
-            declaration_list = [] 
+            clearance_list = []
+            for d_col, q_col, r_col in clearance_col_groups:
+                d_val = safe_date_parse(row.get(d_col)) if d_col else None
+                q_val = safe_float_parse(row.get(q_col)) if q_col else 0.0
+                r_val = safe_float_parse(row.get(r_col)) if r_col else 0.0
+                if d_val or q_val: clearance_list.append({"date": d_val, "qty": q_val, "rate": r_val})
+
+            declaration_list = []
+            for d_col, n_col in declaration_col_groups:
+                d_val = safe_date_parse(row.get(d_col)) if d_col else None
+                n_raw = row.get(n_col) if n_col else None
+                n_val = str(n_raw).strip() if pd.notna(n_raw) else ''
+                if d_val or n_val: declaration_list.append({"date": d_val, "no": n_val})
 
             data = {
                 'product_id': pid, 'ck_code': get_val('ck'),
@@ -552,6 +675,8 @@ def parse_import_full_excel(df):
                 'exchange_rate': get_val('ex_rate', safe_float_parse),
                 'balance': get_val('balance', safe_float_parse),
                 'avg_exchange_rate': get_val('avg_ex', safe_float_parse),
+                'remaining_qty': safe_float_parse(row.get(remaining_col)) if remaining_col else 0.0,
+                'transport_status': str(row.get(transport_col)).strip() if transport_col and pd.notna(row.get(transport_col)) else None,
                 'clearance_info': clearance_list,
                 'declaration_info': declaration_list,
                 'status': 'PENDING'
@@ -573,7 +698,7 @@ MENU_OPTIONS = [
     "📊 수입진행상황", 
     "📒 수입장부 (상세)", 
     "📤 수출 (Export)", 
-    "tj 삼각무역 (Triangular)", 
+    "📐 삼각무역 (Triangular)",
     "📝 수입 등록/관리", 
     "📦 품목 관리"
 ]
@@ -625,8 +750,9 @@ if selected_tab == MENU_OPTIONS[0]:
         .progress-table .prod-cell { font-weight: bold; background-color: #f8f9fa; text-align: center; }
         .progress-table .size-cell { background-color: #f8f9fa; }
         .progress-table .date-cell { font-weight: bold; font-size: 12px; border-bottom: 1px dotted #ced4da; }
-        .progress-table .qty-cell { font-weight: normal; color: #495057; }
-        
+        .progress-table .qty-cell { font-weight: normal; color: #495057; border-bottom: 1px dotted #ced4da; }
+        .progress-table .sup-cell { font-weight: normal; font-size: 11px; color: #868e96; }
+
         /* 상태별 배경색 (스크린샷 참고) */
         .cell-pending { background-color: #fff3bf !important; } /* 노란색 (진행중) */
         .cell-arrived { background-color: #3bc9db !important; color: white; } /* 파란색 (입고완료) */
@@ -635,16 +761,23 @@ if selected_tab == MENU_OPTIONS[0]:
     """, unsafe_allow_html=True)
     
     df = get_schedule_data('import_schedules', 'ALL')
-    
+
     if df.empty:
         st.info("등록된 수입 일정이 없습니다.")
     else:
         # CANCELED(취소) 건은 현황판에서 제외
         df = df[df['status'] != 'CANCELED']
-        
+
+        with st.expander("🔍 조회 필터 (업체 / 품목 / 도착일)"):
+            df = render_search_filters(df, "dash")
+
+        if df.empty:
+            st.warning("조회 조건에 맞는 데이터가 없습니다.")
+            st.stop()
+
         # 착지(destination) 빈 값 처리
         df['destination'] = df['destination'].fillna('기본 착지').replace('', '기본 착지')
-        
+
         html_content = ""
         
         # 1. 착지(Destination) 별로 먼저 그룹화
@@ -672,50 +805,57 @@ if selected_tab == MENU_OPTIONS[0]:
                 <tr>
                   <th style="width: 18%;">품명</th>
                   <th style="width: 12%;">사이즈</th>
-                  <th colspan="{max_cols}">입고일 (ETA) / 수량</th>
+                  <th colspan="{max_cols}">입고일(ETA) / 수량 / 수출자·단가</th>
                 </tr>
               </thead>
               <tbody>
             """
-            
+
             # 각 품목/사이즈 별로 행(Row) 생성
             for (p_name, size), p_group in prod_groups:
                 # 날짜순 정렬
                 p_group = p_group.sort_values(by='expected_date')
-                
+
                 p_name_str = p_name if pd.notna(p_name) and str(p_name).strip() != '' else '-'
                 size_str = size if pd.notna(size) and str(size).strip() != '' else '-'
-                
+
                 date_cells = ""
                 qty_cells = ""
-                
-                # 가로로 나열될 날짜 및 수량 셀 생성
+                sup_cells = ""
+
+                # 가로로 나열될 날짜/수량/수출자·단가 셀 생성
                 for _, row in p_group.iterrows():
                     eta = pd.to_datetime(row['expected_date']).strftime('%y/%m/%d') if pd.notna(row['expected_date']) else '-'
                     qty = f"{int(row['quantity']):,}" if pd.notna(row['quantity']) else "0"
                     status = row['status']
-                    
+                    supplier_str = str(row['supplier']).strip() if pd.notna(row.get('supplier')) and str(row.get('supplier')).strip() else '-'
+                    price_val = row.get('unit_price')
+                    price_str = f"${float(price_val):,.2f}" if pd.notna(price_val) and float(price_val) > 0 else '-'
+
                     # 상태에 따른 배경색 클래스 할당
                     bg_class = "cell-default"
                     if status == 'PENDING':
                         bg_class = "cell-pending"
                     elif status == 'ARRIVED':
                         bg_class = "cell-arrived"
-                        
+
                     date_cells += f"<td class='date-cell {bg_class}'>{eta}</td>"
                     qty_cells += f"<td class='qty-cell {bg_class}'>{qty}</td>"
-                
+                    sup_cells += f"<td class='sup-cell {bg_class}'>{supplier_str}<br>{price_str}</td>"
+
                 # 빈 칸 채우기 (테이블 레이아웃 유지용)
                 empty_cols = max_cols - len(p_group)
                 for _ in range(empty_cols):
                     date_cells += "<td class='date-cell cell-default'></td>"
                     qty_cells += "<td class='qty-cell cell-default'></td>"
-                
-                # 2줄을 묶어서 하나의 품목 행으로 렌더링 (날짜 줄, 수량 줄)
-                tr1 = f"<tr><td rowspan='2' class='prod-cell'>{p_name_str}</td><td rowspan='2' class='size-cell'>{size_str}</td>{date_cells}</tr>"
+                    sup_cells += "<td class='sup-cell cell-default'></td>"
+
+                # 3줄을 묶어서 하나의 품목 행으로 렌더링 (날짜 줄, 수량 줄, 수출자·단가 줄)
+                tr1 = f"<tr><td rowspan='3' class='prod-cell'>{p_name_str}</td><td rowspan='3' class='size-cell'>{size_str}</td>{date_cells}</tr>"
                 tr2 = f"<tr>{qty_cells}</tr>"
-                
-                html_content += tr1 + tr2
+                tr3 = f"<tr>{sup_cells}</tr>"
+
+                html_content += tr1 + tr2 + tr3
                 
             html_content += "</tbody></table>"
             
@@ -727,35 +867,40 @@ elif selected_tab == MENU_OPTIONS[1]:
     st.info("💡 행을 클릭하면 해당 건의 수정(등록/관리) 페이지로 이동합니다.")
     
     df_ledger = get_schedule_data('import_schedules', 'ALL')
-    
+
     if not df_ledger.empty:
+        with st.expander("🔍 조회 필터 (업체 / 품목 / 도착일)", expanded=True):
+            df_ledger = render_search_filters(df_ledger, "ledger")
+
+        if df_ledger.empty:
+            st.warning("조회 조건에 맞는 데이터가 없습니다.")
+            st.stop()
+
         if 'tri_cnt' in df_ledger.columns:
             df_ledger.insert(0, '구분', df_ledger['tri_cnt'].apply(lambda x: '삼각' if x > 0 else ''))
-        
+
         # [수정] 동적 키 사용 (선택 상태 초기화용)
         dynamic_key = f"ledger_df_{st.session_state['df_key_tracker']}"
-        
+
         event = st.dataframe(
-            df_ledger, 
-            use_container_width=True, 
-            height=600, 
+            df_ledger,
+            use_container_width=True,
+            height=600,
             hide_index=True,
             on_select="rerun",
             selection_mode="single-row",
             key=dynamic_key
         )
-        
+
         if len(event.selection.rows) > 0:
             selected_idx = event.selection.rows[0]
             selected_row = df_ledger.iloc[selected_idx].to_dict()
             
             st.session_state['edit_mode'] = 'edit'
             st.session_state['selected_data'] = selected_row
-            try: st.session_state['clearance_list'] = json.loads(selected_row.get('clearance_info')) if selected_row.get('clearance_info') else []
-            except: st.session_state['clearance_list'] = []
-            try: st.session_state['declaration_list'] = json.loads(selected_row.get('declaration_info')) if selected_row.get('declaration_info') else []
-            except: st.session_state['declaration_list'] = []
-            
+            st.session_state['clearance_list'] = parse_json_field(selected_row.get('clearance_info'))
+            st.session_state['declaration_list'] = parse_json_field(selected_row.get('declaration_info'))
+
             # [핵심 수정] 상태 변수를 변경하고 리런하여 라디오 버튼 인덱스 재계산 유도
             st.session_state['active_tab'] = MENU_OPTIONS[4] # "📝 수입 등록/관리"
             st.session_state['df_key_tracker'] += 1
@@ -821,10 +966,22 @@ elif selected_tab == MENU_OPTIONS[2]:
 # --- TAB 4: 삼각무역 (Triangular) - Tag Management ---
 elif selected_tab == MENU_OPTIONS[3]:
     st.markdown("### 📐 삼각무역 (부가 정보 관리)")
-    st.markdown("기존 수입 건에 **삼각무역 관련 부가 정보(Tag)**를 연결하여 관리합니다.")
-    
+    st.markdown("기존 수입 건에 **삼각무역 관련 부가 정보(Tag)**를 연결하여 관리합니다. (건당 여러 개의 부가 정보 등록 가능)")
+
+    with st.expander("📋 전체 삼각무역 등록 현황 (조회)", expanded=False):
+        all_tri_df = get_all_triangular_trades()
+        if all_tri_df.empty:
+            st.info("등록된 삼각무역 정보가 없습니다.")
+        else:
+            search_tri = st.text_input("🔍 검색 (CK, 품명, 수입자 등)", key="tri_overview_search")
+            view_df = all_tri_df
+            if search_tri:
+                mask = view_df.apply(lambda x: x.astype(str).str.contains(search_tri, case=False).any(), axis=1)
+                view_df = view_df[mask]
+            st.dataframe(view_df, use_container_width=True, hide_index=True)
+
     col_sel, col_detail = st.columns([1, 2])
-    
+
     with col_sel:
         st.markdown("#### 1. 대상 수입 건 선택")
         imp_df = get_schedule_data('import_schedules', 'ALL')
@@ -833,28 +990,55 @@ elif selected_tab == MENU_OPTIONS[3]:
             selected_imp_id = None
         else:
             imp_df['label'] = imp_df.apply(lambda x: f"[{x['ck_code'] or 'NO-CK'}] {x['product_name']}", axis=1)
-            selected_imp_id = st.selectbox("수입 건 목록", imp_df['id'], format_func=lambda x: imp_df[imp_df['id']==x]['label'].values[0])
-    
+            selected_imp_id = st.selectbox(
+                "수입 건 목록", imp_df['id'], format_func=lambda x: imp_df[imp_df['id']==x]['label'].values[0],
+                key="tri_selected_imp_id", on_change=lambda: st.session_state.update({'tri_edit_id': 'NEW'})
+            )
+
     with col_detail:
         if selected_imp_id:
             target_row = imp_df[imp_df['id'] == selected_imp_id].iloc[0].to_dict()
-            
+
             st.markdown("#### 2. 선택된 수입 건 정보 (참고용)")
             c1, c2, c3 = st.columns(3)
             c1.info(f"**CK관리번호**: {target_row.get('ck_code') or '-'}")
             c2.info(f"**원산지**: {target_row.get('origin') or '-'}")
             c3.info(f"**품명**: {target_row.get('product_name')}")
 
-            # 기존 삼각무역 태그 조회 (단일 건)
+            # 이 수입 건에 연결된 삼각무역 태그 목록 (여러 건 가능)
             tri_df = get_triangular_trades(selected_imp_id)
-            existing_data = None
-            if not tri_df.empty:
-                existing_data = tri_df.iloc[0].to_dict()
 
-            action_txt = "수정" if existing_data else "등록"
-            st.markdown(f"#### 3. 삼각무역 부가 정보 ({action_txt})")
-            
-            with st.form("add_tri_tag_form"):
+            if 'tri_edit_id' not in st.session_state: st.session_state['tri_edit_id'] = 'NEW'
+
+            if not tri_df.empty:
+                st.markdown("#### 3. 등록된 부가 정보 목록")
+                for _, trow in tri_df.iterrows():
+                    with st.container(border=True):
+                        cc1, cc2, cc3 = st.columns([3, 1, 1])
+                        cc1.markdown(f"**수입자:** {trow.get('importer') or '-'} | **Invoice:** {trow.get('invoice_no') or '-'} | **ETA:** {trow.get('eta') or '-'}")
+                        if cc2.button("수정", key=f"tri_edit_{trow['id']}", use_container_width=True):
+                            st.session_state['tri_edit_id'] = trow['id']
+                            st.rerun()
+                        if cc3.button("삭제", key=f"tri_del_{trow['id']}", use_container_width=True):
+                            ok, msg = delete_triangular_trade(trow['id'])
+                            if ok:
+                                st.session_state['tri_edit_id'] = 'NEW'
+                                st.rerun()
+                            else: st.error(msg)
+                if st.button("➕ 새 부가 정보 추가", use_container_width=True):
+                    st.session_state['tri_edit_id'] = 'NEW'
+                    st.rerun()
+
+            edit_id = st.session_state['tri_edit_id']
+            existing_data = None
+            if edit_id != 'NEW' and not tri_df.empty:
+                match = tri_df[tri_df['id'] == edit_id]
+                if not match.empty: existing_data = match.iloc[0].to_dict()
+
+            action_txt = "수정" if existing_data else "신규 등록"
+            st.markdown(f"#### 4. 삼각무역 부가 정보 ({action_txt})")
+
+            with st.form(f"add_tri_tag_form_{edit_id}"):
                 st.caption(f"이 수입 건에 대한 부가 정보를 {action_txt}합니다.")
                 
                 # 값 초기화 로직
@@ -917,6 +1101,7 @@ elif selected_tab == MENU_OPTIONS[3]:
                     ok, msg = save_triangular_trade(save_data, tid)
                     if ok:
                         st.success(msg)
+                        st.session_state['tri_edit_id'] = 'NEW'
                         time.sleep(1)
                         st.rerun()
                     else: st.error(f"오류: {msg}")
@@ -931,8 +1116,30 @@ elif selected_tab == MENU_OPTIONS[4]:
         with sub_t1:
             st.subheader("등록 건 목록")
             df_list = get_schedule_data('import_schedules', 'ALL')
-            
-            search_txt = st.text_input("🔍 검색 (CK, 품명 등)", key="list_search")
+
+            with st.expander("🔍 조회 필터 (업체 / 품목 / 도착일)"):
+                fc1, fc2 = st.columns(2)
+                supplier_opts = ['전체']
+                if not df_list.empty and 'supplier' in df_list.columns:
+                    supplier_opts += sorted([str(x) for x in df_list['supplier'].dropna().unique() if str(x).strip()])
+                product_opts = ['전체']
+                if not df_list.empty and 'product_name' in df_list.columns:
+                    product_opts += sorted([str(x) for x in df_list['product_name'].dropna().unique() if str(x).strip()])
+                sel_supplier = fc1.selectbox("업체", supplier_opts, key="list_supplier")
+                sel_product = fc2.selectbox("품목", product_opts, key="list_product")
+                dc1, dc2 = st.columns(2)
+                date_from = dc1.date_input("도착일(부터)", value=None, key="list_date_from")
+                date_to = dc2.date_input("도착일(까지)", value=None, key="list_date_to")
+
+            if not df_list.empty:
+                if sel_supplier != '전체': df_list = df_list[df_list['supplier'].astype(str) == sel_supplier]
+                if sel_product != '전체': df_list = df_list[df_list['product_name'].astype(str) == sel_product]
+                if date_from or date_to:
+                    dcol = pd.to_datetime(df_list['expected_date'], errors='coerce').dt.date
+                    if date_from: df_list = df_list[dcol.notna() & (dcol >= date_from)]
+                    if date_to: df_list = df_list[dcol.notna() & (dcol <= date_to)]
+
+            search_txt = st.text_input("🔍 키워드 검색 (CK, 품명 등)", key="list_search")
             if not df_list.empty and search_txt:
                 mask = df_list.apply(lambda x: x.astype(str).str.contains(search_txt, case=False).any(), axis=1)
                 df_list = df_list[mask]
@@ -956,13 +1163,9 @@ elif selected_tab == MENU_OPTIONS[4]:
                         if st.button("상세/수정", key=f"sel_{row['id']}", use_container_width=True):
                             st.session_state['edit_mode'] = 'edit'
                             st.session_state['selected_data'] = row.to_dict()
-                            
-                            try: st.session_state['clearance_list'] = json.loads(row['clearance_info']) if row['clearance_info'] else []
-                            except: st.session_state['clearance_list'] = []
-                            
-                            try: st.session_state['declaration_list'] = json.loads(row['declaration_info']) if row['declaration_info'] else []
-                            except: st.session_state['declaration_list'] = []
-                            
+                            st.session_state['clearance_list'] = parse_json_field(row.get('clearance_info'))
+                            st.session_state['declaration_list'] = parse_json_field(row.get('declaration_info'))
+
                             st.rerun()
             else: st.info("데이터가 없습니다.")
         
@@ -1017,7 +1220,8 @@ elif selected_tab == MENU_OPTIONS[4]:
         if edit_mode == 'edit' and not data:
             st.info("좌측 목록에서 항목을 선택해주세요.")
         else:
-            with st.form("detail_form"):
+            rec_key = data.get('id', 'new') if data else 'new'
+            with st.form(f"detail_form_{rec_key}"):
                 ft1, ft2, ft3, ft4 = st.tabs(["기본/계약", "물류/일정", "결제/L/C", "통관/기타"])
 
                 with ft1:
@@ -1056,20 +1260,27 @@ elif selected_tab == MENU_OPTIONS[4]:
                     box_qty = c2.number_input("박스 수량", value=float(data.get('box_qty') or 0.0))
                     open_amount = c3.number_input("오픈 금액", value=float(data.get('open_amount') or 0.0))
 
+                    c1, c2 = st.columns(2)
+                    doc_amount = c1.number_input("서류 금액", value=float(data.get('doc_amount') or 0.0))
+
                 with ft2:
                     st.markdown("<div class='form-header'>일정 및 물류 정보</div>", unsafe_allow_html=True)
                     c1, c2 = st.columns(2)
                     etd = c1.date_input("ETD (출항)", value=safe_date_parse(data.get('etd')))
                     eta = c2.date_input("ETA (입항/예정일)", value=safe_date_parse(data.get('expected_date')) or get_kst_today())
-                    
-                    c1, c2 = st.columns(2)
+
+                    c1, c2, c3 = st.columns(3)
                     arrival_date = c1.date_input("실 입고일", value=safe_date_parse(data.get('arrival_date')))
                     actual_in_qty = c2.number_input("실 입고 수량", value=float(data.get('actual_in_qty') or 0.0))
-                    
-                    c1, c2 = st.columns(2)
+                    remaining_qty = c3.number_input("잔량", value=float(data.get('remaining_qty') or 0.0))
+
+                    c1, c2, c3 = st.columns(3)
                     warehouse = c1.text_input("창고", value=data.get('warehouse', ''))
                     destination = c2.text_input("착지", value=data.get('destination', ''))
-                    
+                    arrival_exchange_rate = c3.number_input("도착일 환율", value=float(data.get('arrival_exchange_rate') or 0.0))
+
+                    transport_status = st.text_input("운송현황", value=data.get('transport_status', '') or '')
+
                     st.markdown("<div class='form-header'>B/L 정보</div>", unsafe_allow_html=True)
                     c1, c2, c3 = st.columns(3)
                     invoice_no = c1.text_input("Invoice No.", value=data.get('invoice_no', ''))
@@ -1082,27 +1293,42 @@ elif selected_tab == MENU_OPTIONS[4]:
                     tt_check = c1.text_input("T/T 여부", value=data.get('tt_check', ''))
                     bank = c2.text_input("개설 은행", value=data.get('bank', ''))
                     open_date = c3.date_input("개설일", value=safe_date_parse(data.get('open_date')))
-                    
+
                     c1, c2, c3 = st.columns(3)
                     lc_no = c1.text_input("L/C No.", value=data.get('lc_no', ''))
                     lg_no = c2.text_input("L/G", value=data.get('lg_no', ''))
                     insurance = c3.text_input("보험", value=data.get('insurance', ''))
 
+                    c1, c2 = st.columns(2)
+                    usance = c1.text_input("Usance", value=data.get('usance', ''))
+                    at_sight = c2.text_input("At Sight", value=data.get('at_sight', ''))
+
                     st.markdown("<div class='form-header'>결제 및 인수</div>", unsafe_allow_html=True)
                     c1, c2, c3 = st.columns(3)
                     doc_acceptance = c1.date_input("서류 인수일", value=safe_date_parse(data.get('doc_acceptance')))
                     maturity_date = c2.date_input("만기일", value=safe_date_parse(data.get('maturity_date')))
-                    payment_date = c3.date_input("결제일", value=safe_date_parse(data.get('payment_date')))
-                    
+                    ext_maturity_date = c3.date_input("연장 만기일", value=safe_date_parse(data.get('ext_maturity_date')))
+
+                    c1, c2, c3 = st.columns(3)
+                    acceptance_rate = c1.number_input("인수수수료율", value=float(data.get('acceptance_rate') or 0.0))
+                    acceptance_fee = c2.number_input("인수수수료", value=float(data.get('acceptance_fee') or 0.0))
+                    discount_fee = c3.number_input("인수할인료", value=float(data.get('discount_fee') or 0.0))
+
+                    c1, c2, c3 = st.columns(3)
+                    payment_date = c1.date_input("결제일", value=safe_date_parse(data.get('payment_date')))
+                    payment_amount = c2.number_input("결제 금액", value=float(data.get('payment_amount') or 0.0))
+                    exchange_rate = c3.number_input("환율", value=float(data.get('exchange_rate') or 0.0))
+
                     c1, c2 = st.columns(2)
-                    payment_amount = c1.number_input("결제 금액", value=float(data.get('payment_amount') or 0.0))
+                    balance = c1.number_input("잔액", value=float(data.get('balance') or 0.0))
+                    avg_exchange_rate = c2.number_input("평균환율", value=float(data.get('avg_exchange_rate') or 0.0))
 
                 with ft4:
-                    st.markdown("<div class='form-header'>통관 정보 (최대 5건)</div>", unsafe_allow_html=True)
+                    st.markdown("<div class='form-header'>통관 정보 (최대 6건)</div>", unsafe_allow_html=True)
                     clr_data = st.session_state['clearance_list']
                     new_clr_list = []
-                    
-                    for i in range(5):
+
+                    for i in range(6):
                         def_date = None; def_qty = 0.0; def_rate = 0.0
                         if i < len(clr_data):
                             try:
@@ -1112,9 +1338,9 @@ elif selected_tab == MENU_OPTIONS[4]:
                             except: pass
                         
                         cc1, cc2, cc3 = st.columns(3)
-                        cd = cc1.date_input(f"통관일자 #{i+1}", value=def_date, key=f"clr_d_{i}")
-                        cq = cc2.number_input(f"수량 #{i+1}", value=def_qty, key=f"clr_q_{i}")
-                        cr = cc3.number_input(f"환율 #{i+1}", value=def_rate, key=f"clr_r_{i}")
+                        cd = cc1.date_input(f"통관일자 #{i+1}", value=def_date, key=f"clr_d_{rec_key}_{i}")
+                        cq = cc2.number_input(f"수량 #{i+1}", value=def_qty, key=f"clr_q_{rec_key}_{i}")
+                        cr = cc3.number_input(f"환율 #{i+1}", value=def_rate, key=f"clr_r_{rec_key}_{i}")
                         if cd or cq > 0: new_clr_list.append({"date": str(cd) if cd else None, "qty": cq, "rate": cr})
 
                     st.markdown("<div class='form-header'>수입신고 정보 (최대 5건)</div>", unsafe_allow_html=True)
@@ -1130,8 +1356,8 @@ elif selected_tab == MENU_OPTIONS[4]:
                             except: pass
                             
                         dc1, dc2 = st.columns(2)
-                        dd = dc1.date_input(f"신고일 #{i+1}", value=d_def_date, key=f"decl_d_{i}")
-                        dn = dc2.text_input(f"신고번호 #{i+1}", value=d_def_no, key=f"decl_n_{i}")
+                        dd = dc1.date_input(f"신고일 #{i+1}", value=d_def_date, key=f"decl_d_{rec_key}_{i}")
+                        dn = dc2.text_input(f"신고번호 #{i+1}", value=d_def_no, key=f"decl_n_{rec_key}_{i}")
                         if dd or dn: new_decl_list.append({"date": str(dd) if dd else None, "no": dn})
 
                     st.markdown("---")
@@ -1140,7 +1366,8 @@ elif selected_tab == MENU_OPTIONS[4]:
                     st.markdown("##### 🏁 진행 상태 설정")
                     curr_status = data.get('status', 'PENDING')
                     status = st.radio("상태", ["PENDING", "ARRIVED", "CANCELED"], index=["PENDING", "ARRIVED", "CANCELED"].index(curr_status), horizontal=True)
-                    
+                    st.caption("💡 PENDING 상태인 건은 품목/사이즈가 일치하면 재고장 화면에 '입고예정'으로 자동 표시됩니다.")
+
                     if status == 'ARRIVED' and curr_status != 'ARRIVED':
                          st.warning("⚠️ 'ARRIVED'로 저장 시 자동으로 재고 테이블에 등록됩니다.")
 
@@ -1152,15 +1379,21 @@ elif selected_tab == MENU_OPTIONS[4]:
                             'ck_code': ck_code, 'global_code': global_code, 'doojin_code': doojin_code,
                             'product_id': sel_pid, 'agency': agency, 'agency_contract': agency_contract,
                             'supplier': supplier, 'origin': origin, 'size': size, 'packing': packing,
-                            'unit_price': unit_price, 'unit2': unit2, 
-                            'quantity': quantity, 'doc_qty': doc_qty, 'box_qty': box_qty,
-                            'open_amount': open_amount, 
-                            'tt_check': tt_check, 'bank': bank, 'lc_no': lc_no, 'open_date': open_date,
+                            'unit_price': unit_price, 'unit2': unit2,
+                            'quantity': quantity, 'open_qty': quantity, 'doc_qty': doc_qty, 'box_qty': box_qty,
+                            'open_amount': open_amount, 'doc_amount': doc_amount,
+                            'tt_check': tt_check, 'bank': bank, 'usance': usance, 'at_sight': at_sight,
+                            'lc_no': lc_no, 'open_date': open_date,
                             'invoice_no': invoice_no, 'bl_no': bl_no, 'lg_no': lg_no, 'insurance': insurance,
                             'etd': etd, 'expected_date': eta, 'arrival_date': arrival_date, 'customs_broker_date': customs_broker_date,
                             'warehouse': warehouse, 'destination': destination, 'actual_in_qty': actual_in_qty,
-                            'doc_acceptance': doc_acceptance, 'maturity_date': maturity_date, 'payment_date': payment_date,
-                            'payment_amount': payment_amount, 'note': note, 'status': status,
+                            'remaining_qty': remaining_qty, 'transport_status': transport_status,
+                            'arrival_exchange_rate': arrival_exchange_rate,
+                            'doc_acceptance': doc_acceptance, 'maturity_date': maturity_date, 'ext_maturity_date': ext_maturity_date,
+                            'acceptance_rate': acceptance_rate, 'acceptance_fee': acceptance_fee, 'discount_fee': discount_fee,
+                            'payment_date': payment_date, 'payment_amount': payment_amount, 'exchange_rate': exchange_rate,
+                            'balance': balance, 'avg_exchange_rate': avg_exchange_rate,
+                            'note': note, 'status': status,
                             'clearance_info': new_clr_list, 'declaration_info': new_decl_list
                         }
                         sid = data.get('id') if edit_mode == 'edit' else None
