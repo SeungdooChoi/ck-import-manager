@@ -71,66 +71,74 @@ st.markdown("""
 # DB 연결 및 스키마 업데이트
 try:
     conn = st.connection("supabase", type="sql")
-    with conn.session as s:
-        # 공통 컬럼 정의 (수입/수출)
-        common_cols = [
-            ("ck_code", "TEXT"), ("size", "TEXT"), ("unit_price", "NUMERIC"), ("supplier", "TEXT"),
-            ("global_code", "TEXT"), ("doojin_code", "TEXT"), ("agency", "TEXT"), ("agency_contract", "TEXT"),
-            ("origin", "TEXT"), ("packing", "TEXT"), ("open_qty", "NUMERIC"), ("doc_qty", "NUMERIC"),
-            ("box_qty", "NUMERIC"), ("unit2", "TEXT"), ("open_amount", "NUMERIC"), ("doc_amount", "NUMERIC"),
-            ("tt_check", "TEXT"), ("bank", "TEXT"), ("usance", "TEXT"), ("at_sight", "TEXT"),
-            ("open_date", "DATE"), ("lc_no", "TEXT"), ("invoice_no", "TEXT"), ("bl_no", "TEXT"),
-            ("lg_no", "TEXT"), ("insurance", "TEXT"), ("customs_broker_date", "DATE"), ("etd", "DATE"),
-            ("arrival_date", "DATE"), ("warehouse", "TEXT"), ("actual_in_qty", "NUMERIC"), ("destination", "TEXT"),
-            ("doc_acceptance", "DATE"), ("acceptance_rate", "NUMERIC"), ("maturity_date", "DATE"),
-            ("ext_maturity_date", "DATE"), ("acceptance_fee", "NUMERIC"), ("discount_fee", "NUMERIC"),
-            ("payment_date", "DATE"), ("payment_amount", "NUMERIC"), ("exchange_rate", "NUMERIC"),
-            ("balance", "NUMERIC"), ("avg_exchange_rate", "NUMERIC"),
-            ("arrival_exchange_rate", "NUMERIC"), # 도착일 환율 (이미지 반영)
-            ("clearance_info", "JSONB"), ("declaration_info", "JSONB"),
-            ("remaining_qty", "NUMERIC"), ("transport_status", "TEXT"),
-            ("status", "TEXT"), ("product_id", "INTEGER"), ("note", "TEXT"), ("quantity", "NUMERIC"), ("expected_date", "DATE")
-        ]
 
-        # 1. Import Schedules 테이블 업데이트
-        for col_name, col_type in common_cols:
-            s.execute(text(f"ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS {col_name} {col_type};"))
-        
-        # 2. Export Schedules 테이블 생성 (수입과 동일 구조)
-        s.execute(text("""
-            CREATE TABLE IF NOT EXISTS export_schedules (
-                id SERIAL PRIMARY KEY,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-        """))
-        for col_name, col_type in common_cols:
-            s.execute(text(f"ALTER TABLE export_schedules ADD COLUMN IF NOT EXISTS {col_name} {col_type};"))
-        
-        # 3. Triangular Trades 테이블 생성 (부가 정보 태그용)
-        # ck_code, origin, product_name 등은 import_id로 찾을 수도 있지만, 스냅샷 성격으로 저장
-        s.execute(text("""
-            CREATE TABLE IF NOT EXISTS triangular_trades (
-                id SERIAL PRIMARY KEY,
-                import_id INTEGER,
-                ck_code TEXT,
-                importer TEXT,
-                origin TEXT,
-                product_name TEXT,
-                size TEXT,
-                packing TEXT,
-                open_qty NUMERIC,
-                unit TEXT,
-                open_amount NUMERIC,
-                invoice_no TEXT,
-                eta DATE,
-                payment_date DATE,
-                payment_amount NUMERIC,
-                exchange_rate NUMERIC,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-        """))
+    @st.cache_resource
+    def run_db_migrations():
+        # 앱 프로세스 시작 후 최초 1회만 실행 (st.cache_resource) — 매 rerun(탭 전환/버튼 클릭)마다
+        # ALTER TABLE 100여 개를 매번 재실행하던 것이 초기 로딩/탭 전환이 느렸던 주된 원인이었음
+        with conn.session as s:
+            # 공통 컬럼 정의 (수입/수출)
+            common_cols = [
+                ("ck_code", "TEXT"), ("size", "TEXT"), ("unit_price", "NUMERIC"), ("supplier", "TEXT"),
+                ("global_code", "TEXT"), ("doojin_code", "TEXT"), ("agency", "TEXT"), ("agency_contract", "TEXT"),
+                ("origin", "TEXT"), ("packing", "TEXT"), ("open_qty", "NUMERIC"), ("doc_qty", "NUMERIC"),
+                ("box_qty", "NUMERIC"), ("unit2", "TEXT"), ("open_amount", "NUMERIC"), ("doc_amount", "NUMERIC"),
+                ("tt_check", "TEXT"), ("bank", "TEXT"), ("usance", "TEXT"), ("at_sight", "TEXT"),
+                ("open_date", "DATE"), ("lc_no", "TEXT"), ("invoice_no", "TEXT"), ("bl_no", "TEXT"),
+                ("lg_no", "TEXT"), ("insurance", "TEXT"), ("customs_broker_date", "DATE"), ("etd", "DATE"),
+                ("arrival_date", "DATE"), ("warehouse", "TEXT"), ("actual_in_qty", "NUMERIC"), ("destination", "TEXT"),
+                ("doc_acceptance", "DATE"), ("acceptance_rate", "NUMERIC"), ("maturity_date", "DATE"),
+                ("ext_maturity_date", "DATE"), ("acceptance_fee", "NUMERIC"), ("discount_fee", "NUMERIC"),
+                ("payment_date", "DATE"), ("payment_amount", "NUMERIC"), ("exchange_rate", "NUMERIC"),
+                ("balance", "NUMERIC"), ("avg_exchange_rate", "NUMERIC"),
+                ("arrival_exchange_rate", "NUMERIC"), # 도착일 환율 (이미지 반영)
+                ("clearance_info", "JSONB"), ("declaration_info", "JSONB"),
+                ("remaining_qty", "NUMERIC"), ("transport_status", "TEXT"),
+                ("status", "TEXT"), ("product_id", "INTEGER"), ("note", "TEXT"), ("quantity", "NUMERIC"), ("expected_date", "DATE")
+            ]
 
-        s.commit()
+            # 1. Import Schedules 테이블 업데이트
+            for col_name, col_type in common_cols:
+                s.execute(text(f"ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS {col_name} {col_type};"))
+
+            # 2. Export Schedules 테이블 생성 (수입과 동일 구조)
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS export_schedules (
+                    id SERIAL PRIMARY KEY,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """))
+            for col_name, col_type in common_cols:
+                s.execute(text(f"ALTER TABLE export_schedules ADD COLUMN IF NOT EXISTS {col_name} {col_type};"))
+
+            # 3. Triangular Trades 테이블 생성 (부가 정보 태그용)
+            # ck_code, origin, product_name 등은 import_id로 찾을 수도 있지만, 스냅샷 성격으로 저장
+            s.execute(text("""
+                CREATE TABLE IF NOT EXISTS triangular_trades (
+                    id SERIAL PRIMARY KEY,
+                    import_id INTEGER,
+                    ck_code TEXT,
+                    importer TEXT,
+                    origin TEXT,
+                    product_name TEXT,
+                    size TEXT,
+                    packing TEXT,
+                    open_qty NUMERIC,
+                    unit TEXT,
+                    open_amount NUMERIC,
+                    invoice_no TEXT,
+                    eta DATE,
+                    payment_date DATE,
+                    payment_amount NUMERIC,
+                    exchange_rate NUMERIC,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """))
+
+            s.commit()
+        return True
+
+    run_db_migrations()
 except Exception as e:
     st.error(f"🚨 DB 연결 오류: .streamlit/secrets.toml을 확인하세요.\n{e}")
     st.stop()
@@ -174,8 +182,9 @@ def register_new_product(code, name, cat, unit):
         rollback_session()
         return False, str(e)
 
+@st.cache_data(ttl=30)
 def get_schedule_data(table_name='import_schedules', status_filter='ALL'):
-    """데이터 조회 (수입/수출 공용)"""
+    """데이터 조회 (수입/수출 공용). 저장/삭제 시 get_schedule_data.clear()로 무효화됨"""
     with conn.session as s:
         # 수입인 경우 삼각무역 태그 존재 여부 확인
         extra_col = ""
@@ -334,14 +343,17 @@ def save_schedule(data, sid=None, table_name='import_schedules'):
                 target_id = res.fetchone()[0]
             s.commit()
 
+        get_schedule_data.clear()
+
         if table_name == 'import_schedules' and params.get('status') == 'ARRIVED' and target_id:
             ok, msg = sync_import_to_inventory(target_id)
             if not ok:
                 with conn.session as s:
                     s.execute(text(f"UPDATE {table_name} SET status = 'PENDING' WHERE id = :id"), {"id": target_id})
                     s.commit()
+                get_schedule_data.clear()
                 return False, f"저장되었으나 재고생성 실패: {msg}"
-        
+
         return True, "저장 완료"
     except Exception as e:
         rollback_session()
@@ -352,6 +364,7 @@ def delete_schedule(sid, table_name='import_schedules'):
         with conn.session as s:
             s.execute(text(f"DELETE FROM {table_name} WHERE id = :sid"), {"sid": sid})
             s.commit()
+        get_schedule_data.clear()
         return True, "삭제 완료"
     except Exception as e:
         rollback_session()
@@ -370,6 +383,7 @@ def save_editor_changes(edited_rows, original_df, table_name='export_schedules')
     except Exception as e: return False, str(e)
 
 # --- 삼각무역 전용 함수 ---
+@st.cache_data(ttl=30)
 def get_triangular_trades(import_id):
     """특정 수입 건에 연결된 삼각무역 태그 조회 (건당 여러 개 가능)"""
     try:
@@ -428,6 +442,7 @@ def save_triangular_trade(data, target_id=None):
                 
             s.commit()
         get_all_triangular_trades.clear()
+        get_triangular_trades.clear()
         return True, msg
     except Exception as e:
         rollback_session()
@@ -439,6 +454,7 @@ def delete_triangular_trade(tid):
             s.execute(text("DELETE FROM triangular_trades WHERE id = :id"), {"id": tid})
             s.commit()
         get_all_triangular_trades.clear()
+        get_triangular_trades.clear()
         return True, "삭제 완료"
     except Exception as e:
         rollback_session()
