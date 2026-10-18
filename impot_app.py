@@ -211,6 +211,13 @@ try:
             except Exception:
                 pass
 
+            # 5. 품목코드 체계: 품목은 '품명' 단위가 아니라 '품명+원산지+사이즈' 조합 단위로 코드가 부여됨
+            # (예: 열빙어-캐나다-46/50과 열빙어-노르웨이-46/50은 서로 다른 코드). products에 원산지 컬럼 추가.
+            try:
+                s.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS origin TEXT;"))
+            except Exception:
+                pass
+
             s.commit()
         return True
 
@@ -309,6 +316,94 @@ def register_new_product(code, name, cat, unit):
     except Exception as e:
         rollback_session()
         return False, str(e)
+
+# --- 품목코드 매칭 (품명+원산지+사이즈 조합 단위로 코드가 부여됨) ---
+def _norm_key(v):
+    return str(v or '').replace(' ', '').strip().upper()
+
+def resolve_product_match(p_df, name, origin, size):
+    """품명+원산지+사이즈로 기존 품목(코드)을 정확히 매칭. 매칭되면 해당 row(Series), 없으면 None"""
+    if p_df is None or p_df.empty or not str(name or '').strip():
+        return None
+    cand = p_df[p_df['품목명'].astype(str).str.strip() == str(name).strip()]
+    if cand.empty:
+        return None
+    n_origin, n_size = _norm_key(origin), _norm_key(size)
+    exact = cand[cand['원산지'].apply(_norm_key).eq(n_origin) & cand['사이즈'].apply(_norm_key).eq(n_size)]
+    if not exact.empty:
+        return exact.iloc[0]
+    return None
+
+def get_product_variants(p_df, name):
+    """같은 품명의 기존 원산지/사이즈 조합(변형) 목록 - 신규건 여부 판단 및 참고용"""
+    if p_df is None or p_df.empty or not str(name or '').strip():
+        return p_df.iloc[0:0] if p_df is not None else pd.DataFrame()
+    return p_df[p_df['품목명'].astype(str).str.strip() == str(name).strip()]
+
+def generate_new_temp_code():
+    """완전 신규 품명+원산지+사이즈 조합에 부여할 임시 코드 (NEW-0001 형식). ERP 쪽 실제 코드 체계와
+    섞이지 않도록 'NEW-' 접두사로 명확히 구분해두고, 나중에 실제 코드로 정정하도록 유도한다."""
+    try:
+        with conn.session as s:
+            rows = s.execute(text("SELECT product_code FROM products WHERE product_code LIKE 'NEW-%'")).fetchall()
+        nums = []
+        for r in rows:
+            m = re.match(r'^NEW-(\d+)$', str(r[0] or ''))
+            if m: nums.append(int(m.group(1)))
+        nxt = max(nums) + 1 if nums else 1
+        return f"NEW-{nxt:04d}"
+    except Exception:
+        return f"NEW-{int(time.time()) % 10000:04d}"
+
+def register_product_variant(name, origin, size, category=None, unit=None):
+    """완전 신규 품명+원산지+사이즈 조합을 위한 품목 자동 생성 (임시 코드 부여)"""
+    code = generate_new_temp_code()
+    try:
+        with conn.session as s:
+            s.execute(text("""
+                INSERT INTO products (product_code, product_name, origin, size, category, unit, is_active)
+                VALUES (:code, :name, :origin, :size, :cat, :unit, TRUE)
+            """), {"code": code, "name": name, "origin": origin or None, "size": size or None,
+                   "cat": category or '미분류', "unit": unit or 'EA'})
+            s.commit()
+        get_products_df.clear()
+        return True, code, None
+    except Exception as e:
+        rollback_session()
+        return False, None, str(e)
+
+def upsert_product_code_master(rows):
+    """품목코드자료(품목코드/제품명/원산지/사이즈) 엑셀을 products에 일괄 반영.
+    코드가 이미 있으면 품명/원산지/사이즈를 갱신, 없으면 신규 등록."""
+    ok_cnt, fail = 0, []
+    try:
+        with conn.session as s:
+            for r in rows:
+                code = str(r.get('code') or '').strip()
+                name = str(r.get('name') or '').strip()
+                if not code or not name:
+                    continue
+                try:
+                    exist = s.execute(text("SELECT product_id FROM products WHERE product_code = :code"), {"code": code}).fetchone()
+                    if exist:
+                        s.execute(text("""
+                            UPDATE products SET product_name=:name, origin=:origin, size=:size WHERE product_code=:code
+                        """), {"name": name, "origin": r.get('origin'), "size": r.get('size'), "code": code})
+                    else:
+                        s.execute(text("""
+                            INSERT INTO products (product_code, product_name, origin, size, category, unit, is_active)
+                            VALUES (:code, :name, :origin, :size, :cat, :unit, TRUE)
+                        """), {"code": code, "name": name, "origin": r.get('origin'), "size": r.get('size'),
+                               "cat": r.get('category') or '미분류', "unit": r.get('unit') or 'EA'})
+                    ok_cnt += 1
+                except Exception as e:
+                    fail.append(f"{code} {name}: {e}")
+            s.commit()
+        get_products_df.clear()
+        return ok_cnt, fail
+    except Exception as e:
+        rollback_session()
+        return ok_cnt, fail + [str(e)]
 
 @st.cache_data(ttl=30)
 def get_schedule_data(table_name='import_schedules', status_filter='ALL'):
@@ -615,6 +710,15 @@ def safe_float_parse(val):
     try: return float(str(val).replace(',', '').replace(' ', '').strip())
     except: return 0.0
 
+def find_col_loose(columns, keywords):
+    """엑셀 업로드 시 헤더명이 정확히 일치하지 않아도 키워드 포함으로 컬럼을 찾는다"""
+    for c in columns:
+        c_clean = str(c).replace(' ', '').upper()
+        for k in keywords:
+            if k.replace(' ', '').upper() in c_clean:
+                return c
+    return None
+
 def _esc(v, default='-'):
     return _html.escape(str(v)) if pd.notna(v) and str(v).strip() else default
 
@@ -706,11 +810,10 @@ def parse_import_full_excel(df):
     """'수입' 탭(상세 장부) 구조의 엑셀/CSV 파일 파싱"""
     valid_data = []
     errors = []
-    
+    notices = []  # 신규 품목코드 자동 생성 등 참고용 안내 (에러 아님)
+
     p_df = get_products_df()
-    if p_df.empty: return [], ["시스템에 등록된 품목이 없습니다."]
-    product_map = {str(row['품목명']).replace(" ", "").lower(): row['ID'] for _, row in p_df.iterrows()}
-    
+
     keywords = ['CK', '관리번호', '품명', '수량', '단가', '글로벌', '두진', '입고일', 'ETA']
     
     def clean_str(s):
@@ -726,7 +829,7 @@ def parse_import_full_excel(df):
     if score_cols >= 2 and (('CK' in col_str or '관리번호' in col_str) and '품명' in col_str):
         data_df = df
     else:
-        if df.empty: return [], ["파일 내용이 없습니다."]
+        if df.empty: return [], ["파일 내용이 없습니다."], []
         max_score = 0
         for i in range(min(20, len(df))):
             row_vals = [clean_str(x) for x in df.iloc[i].values if pd.notna(x)]
@@ -740,7 +843,7 @@ def parse_import_full_excel(df):
             df.columns = df.iloc[header_row_idx]
             data_df = df.iloc[header_row_idx+1:].reset_index(drop=True)
         else:
-            return [], ["헤더를 찾을 수 없습니다."]
+            return [], ["헤더를 찾을 수 없습니다."], []
 
     data_df.columns = [clean_str(c) for c in data_df.columns]
     cols = list(data_df.columns)
@@ -815,12 +918,29 @@ def parse_import_full_excel(df):
         if not col_map['name']: continue
         name_val = str(row.get(col_map['name'], '')).strip()
         if not name_val or name_val.lower() == 'nan': continue
-        
-        pid = product_map.get(name_val.replace(" ", "").lower())
-        if not pid:
-            errors.append(f"[행 {idx+2}] 알 수 없는 품목: '{name_val}'")
-            continue
-            
+
+        origin_col, size_col = col_map.get('origin'), col_map.get('size')
+        origin_val = str(row.get(origin_col, '') or '').strip() if origin_col else ''
+        size_val = str(row.get(size_col, '') or '').strip() if size_col else ''
+
+        # 품명+원산지+사이즈 조합으로 기존 품목코드 매칭. 일치하는 코드가 없으면
+        # (품명 자체가 없거나, 품명은 있어도 원산지/사이즈 조합이 새로운 경우 모두) 임시 코드를 자동 생성한다.
+        match = resolve_product_match(p_df, name_val, origin_val, size_val)
+        if match is not None:
+            pid = match['ID']
+        else:
+            variants = get_product_variants(p_df, name_val)
+            inherit_cat = str(variants.iloc[0]['카테고리']) if not variants.empty and pd.notna(variants.iloc[0]['카테고리']) else None
+            inherit_unit = str(variants.iloc[0]['단위']) if not variants.empty and pd.notna(variants.iloc[0]['단위']) else None
+            ok_np, new_code, err_np = register_product_variant(name_val, origin_val, size_val, inherit_cat, inherit_unit)
+            if not ok_np:
+                errors.append(f"[행 {idx+2}] 신규 품목코드 생성 실패: '{name_val}' - {err_np}")
+                continue
+            p_df = get_products_df()
+            new_row = p_df[p_df['품목코드'] == new_code]
+            pid = new_row.iloc[0]['ID'] if not new_row.empty else None
+            notices.append(f"[행 {idx+2}] 🆕 신규 품목코드 자동 생성: '{name_val}' / 원산지='{origin_val}' / 사이즈='{size_val}' → {new_code}")
+
         try:
             def get_val(key, parser=str):
                 col = col_map.get(key)
@@ -887,7 +1007,7 @@ def parse_import_full_excel(df):
         except Exception as e:
             errors.append(f"[행 {idx+2}] 파싱 오류: {str(e)}")
             
-    return valid_data, errors
+    return valid_data, errors, notices
 
 # ==========================================
 # 1-1. 로그인 게이트
@@ -1450,13 +1570,18 @@ elif selected_tab == MENU_OPTIONS[4]:
                                 except: up_file.seek(0); df_up = pd.read_csv(up_file, encoding='cp949')
                             else: df_up = pd.read_excel(up_file)
                             
-                            valid_rows, err_list = parse_import_full_excel(df_up)
-                        
+                            valid_rows, err_list, notice_list = parse_import_full_excel(df_up)
+
+                            if notice_list:
+                                st.info(f"🆕 신규 품목코드 {len(notice_list)}건이 자동 생성되었습니다 (ERP 실제 코드로는 [품목 관리] 탭에서 나중에 정정해주세요).")
+                                with st.expander("신규 코드 생성 내역 보기"):
+                                    for n in notice_list: st.write(f"- {n}")
+
                             if err_list:
                                 st.error(f"{len(err_list)}건의 에러가 있습니다.")
                                 with st.expander("에러 상세 보기"):
                                     for e in err_list: st.write(f"- {e}")
-                        
+
                             if valid_rows:
                                 st.success(f"{len(valid_rows)}건의 유효 데이터를 찾았습니다.")
                                 prog = st.progress(0)
@@ -1496,6 +1621,43 @@ elif selected_tab == MENU_OPTIONS[4]:
                 st.info("좌측 목록에서 항목을 선택해주세요.")
             else:
                 rec_key = data.get('id', 'new') if data else 'new'
+
+                # [품목 식별] 폼 바깥에 둬서 품명/원산지/사이즈를 바꿀 때마다 바로 매칭 결과가 갱신되게 함
+                # (st.form 안에서는 제출 전까지 화면이 갱신되지 않아 실시간 매칭이 불가능함)
+                st.markdown("<div class='form-header'>품목 식별 (품명+원산지+사이즈로 코드 자동 매칭)</div>", unsafe_allow_html=True)
+                p_df = get_products_df()
+                existing_names = sorted(p_df['품목명'].dropna().astype(str).unique().tolist()) if not p_df.empty else []
+                NEW_NAME_SENTINEL = "🆕 새 품명 직접 입력"
+                default_name = str(data.get('product_name') or '') if data else ''
+
+                idc1, idc2, idc3 = st.columns(3)
+                name_opts = [NEW_NAME_SENTINEL] + existing_names
+                name_idx = name_opts.index(default_name) if default_name in existing_names else 0
+                sel_name_choice = idc1.selectbox("품명", name_opts, index=name_idx, key=f"id_name_sel_{rec_key}")
+                if sel_name_choice == NEW_NAME_SENTINEL:
+                    id_name = idc1.text_input("새 품명 입력", value=default_name if default_name not in existing_names else '', key=f"id_name_new_{rec_key}")
+                else:
+                    id_name = sel_name_choice
+                id_origin = idc2.text_input("원산지", value=data.get('origin', '') if data else '', key=f"id_origin_{rec_key}")
+                id_size = idc3.text_input("사이즈", value=data.get('size', '') if data else '', key=f"id_size_{rec_key}")
+
+                match_row = resolve_product_match(p_df, id_name, id_origin, id_size)
+                pending_new_product = False
+                if match_row is not None:
+                    sel_pid = match_row['ID']
+                    st.success(f"✅ 매칭된 품목코드: **{match_row['품목코드']}** ([{match_row['카테고리']}] {match_row['품목명']})")
+                elif str(id_name).strip():
+                    sel_pid = None
+                    pending_new_product = True
+                    variants = get_product_variants(p_df, id_name)
+                    if not variants.empty:
+                        with st.expander(f"ℹ️ '{id_name}'의 기존 원산지/사이즈 조합 {len(variants)}건 (참고)"):
+                            st.dataframe(variants[['품목코드', '원산지', '사이즈']], hide_index=True, use_container_width=True)
+                    st.warning("⚠️ 신규 품목 조합입니다 (일치하는 기존 코드가 없습니다). 저장 시 임시 코드가 자동 생성됩니다 (예: NEW-0001). 실제 ERP 코드로는 나중에 [품목 관리] 탭에서 정정해주세요.")
+                else:
+                    sel_pid = None
+                    st.info("품명을 입력/선택하면 품목코드가 자동으로 매칭됩니다.")
+
                 with st.form(f"detail_form_{rec_key}"):
                     ft1, ft2, ft3, ft4 = st.tabs(["기본/계약", "물류/일정", "결제/L/C", "통관/기타"])
 
@@ -1505,25 +1667,14 @@ elif selected_tab == MENU_OPTIONS[4]:
                         ck_code = c1.text_input("CK 관리번호", value=data.get('ck_code', ''))
                         global_code = c2.text_input("글로벌 번호", value=data.get('global_code', ''))
                         doojin_code = c3.text_input("두진 번호", value=data.get('doojin_code', ''))
-                    
-                        p_df = get_products_df()
-                        p_opts = {row['ID']: f"[{row['카테고리']}] {row['품목명']} ({row['품목코드']})" for _, row in p_df.iterrows()}
-                        def_pid = data.get('product_id')
-                        if def_pid not in p_opts: def_pid = None
-                        opt_keys = list(p_opts.keys())
-                        sel_idx = opt_keys.index(def_pid) if def_pid in opt_keys else 0
-                        sel_pid = st.selectbox("품목 (필수)", options=opt_keys, format_func=lambda x: p_opts[x], index=sel_idx)
 
                         st.markdown("<div class='form-header'>계약 및 물품 정보</div>", unsafe_allow_html=True)
                         c1, c2, c3 = st.columns(3)
                         supplier = c1.text_input("수출자(수입자)", value=data.get('supplier', ''))
                         agency = c2.text_input("대행사", value=data.get('agency', ''))
                         agency_contract = c3.text_input("대행 계약서", value=data.get('agency_contract', ''))
-                    
-                        c1, c2, c3 = st.columns(3)
-                        origin = c1.text_input("원산지", value=data.get('origin', ''))
-                        size = c2.text_input("사이즈", value=data.get('size', ''))
-                        packing = c3.text_input("Packing", value=data.get('packing', ''))
+
+                        packing = st.text_input("Packing", value=data.get('packing', ''))
                     
                         c1, c2, c3 = st.columns(3)
                         unit_price = c1.number_input("단가 (USD)", value=float(data.get('unit_price') or 0.0), step=0.01, format="%.2f")
@@ -1650,10 +1801,26 @@ elif selected_tab == MENU_OPTIONS[4]:
                     c_submit, c_del = st.columns([4, 1])
                     with c_submit:
                         if st.form_submit_button("💾 정보 저장", type="primary", use_container_width=True):
+                            final_pid = sel_pid
+                            if not str(id_name).strip():
+                                st.error("품목(품명)을 먼저 선택/입력해주세요.")
+                                st.stop()
+                            if pending_new_product:
+                                variants = get_product_variants(p_df, id_name)
+                                inherit_cat = str(variants.iloc[0]['카테고리']) if not variants.empty and pd.notna(variants.iloc[0]['카테고리']) else None
+                                inherit_unit = str(variants.iloc[0]['단위']) if not variants.empty and pd.notna(variants.iloc[0]['단위']) else None
+                                ok_np, new_code, err_np = register_product_variant(id_name, id_origin, id_size, inherit_cat, inherit_unit)
+                                if not ok_np:
+                                    st.error(f"신규 품목 생성 실패: {err_np}")
+                                    st.stop()
+                                new_p_df = get_products_df()
+                                new_row = new_p_df[new_p_df['품목코드'] == new_code]
+                                final_pid = new_row.iloc[0]['ID'] if not new_row.empty else None
+                                st.toast(f"🆕 신규 품목코드 {new_code} 생성됨", icon="🆕")
                             save_data = {
                                 'ck_code': ck_code, 'global_code': global_code, 'doojin_code': doojin_code,
-                                'product_id': sel_pid, 'agency': agency, 'agency_contract': agency_contract,
-                                'supplier': supplier, 'origin': origin, 'size': size, 'packing': packing,
+                                'product_id': final_pid, 'agency': agency, 'agency_contract': agency_contract,
+                                'supplier': supplier, 'origin': id_origin, 'size': id_size, 'packing': packing,
                                 'unit_price': unit_price, 'unit2': unit2,
                                 'quantity': quantity, 'open_qty': quantity, 'doc_qty': doc_qty, 'box_qty': box_qty,
                                 'open_amount': open_amount, 'doc_amount': doc_amount,
@@ -1692,28 +1859,78 @@ elif selected_tab == MENU_OPTIONS[4]:
 # --- TAB 6: 품목 관리 ---
 elif selected_tab == MENU_OPTIONS[5]:
     st.markdown("### 📦 시스템 품목 관리")
+    st.caption("품목코드는 '품명' 단위가 아니라 **품명+원산지+사이즈** 조합 단위로 부여됩니다 (같은 품명도 원산지/사이즈가 다르면 코드가 다릅니다).")
     col_p1, col_p2 = st.columns([1, 2])
     with col_p1:
         st.markdown("#### 신규 품목 등록")
         with st.form("new_prod_form"):
             new_code = st.text_input("품목코드 (고유값)", placeholder="예: P1001")
             new_name = st.text_input("품목명")
+            c1, c2 = st.columns(2)
+            new_origin = c1.text_input("원산지")
+            new_size = c2.text_input("사이즈")
             new_cat = st.text_input("카테고리", placeholder="예: 수입")
             new_unit = st.text_input("기본 단위", value="Box")
-            
+
             if st.form_submit_button("품목 저장", type="primary"):
                 if new_code and new_name:
                     succ, msg = register_new_product(new_code, new_name, new_cat, new_unit)
                     if succ:
+                        # 원산지/사이즈는 register_new_product 시그니처에 없으므로 바로 이어서 채워준다
+                        try:
+                            with conn.session as s:
+                                s.execute(text("UPDATE products SET origin=:o, size=:s WHERE product_code=:c"),
+                                          {"o": new_origin or None, "s": new_size or None, "c": new_code})
+                                s.commit()
+                            get_products_df.clear()
+                        except Exception:
+                            rollback_session()
                         st.success(msg)
                         time.sleep(1)
                         st.rerun()
                     else: st.error(msg)
                 else: st.warning("코드와 품목명은 필수입니다.")
-    
+
+        st.markdown("---")
+        st.markdown("#### 품목코드 마스터 일괄 업로드")
+        st.caption("품목코드/제품명/원산지/사이즈(/규격) 컬럼이 있는 엑셀을 올리면, 코드가 이미 있으면 정보를 갱신하고 없으면 신규 등록합니다.")
+        code_file = st.file_uploader("품목코드 마스터 파일 (xlsx)", type=['xlsx'], key="code_master_upload")
+        if code_file and st.button("일괄 반영", use_container_width=True):
+            try:
+                df_cm = pd.read_excel(code_file)
+                col_code = find_col_loose(df_cm.columns, ['품목코드', '코드'])
+                col_name = find_col_loose(df_cm.columns, ['제품명', '품명', '품목명'])
+                col_origin = find_col_loose(df_cm.columns, ['원산지'])
+                col_size = find_col_loose(df_cm.columns, ['사이즈'])
+                if not col_code or not col_name:
+                    st.error("'품목코드'와 '제품명(품명)' 컬럼을 찾을 수 없습니다.")
+                else:
+                    rows = []
+                    for _, r in df_cm.iterrows():
+                        rows.append({
+                            'code': r.get(col_code), 'name': r.get(col_name),
+                            'origin': r.get(col_origin) if col_origin else None,
+                            'size': r.get(col_size) if col_size else None,
+                        })
+                    ok_cnt, fail = upsert_product_code_master(rows)
+                    st.success(f"{ok_cnt}건 반영 완료")
+                    if fail:
+                        with st.expander(f"실패 {len(fail)}건"):
+                            for f in fail: st.write(f"- {f}")
+                    time.sleep(1)
+                    st.rerun()
+            except Exception as e:
+                st.error(f"업로드 처리 오류: {e}")
+
     with col_p2:
         st.markdown("#### 등록된 품목 리스트")
         curr_prods = get_products_df()
         if not curr_prods.empty:
-            st.dataframe(curr_prods, use_container_width=True, hide_index=True)
+            prod_search = st.text_input("🔍 품목명/코드/원산지 검색", key="prod_mgmt_search")
+            view_prods = curr_prods
+            if prod_search:
+                mask = view_prods.apply(lambda x: x.astype(str).str.contains(prod_search, case=False).any(), axis=1)
+                view_prods = view_prods[mask]
+            st.caption(f"총 {len(curr_prods)}개 품목 중 {len(view_prods)}개 표시")
+            st.dataframe(view_prods, use_container_width=True, hide_index=True)
         else: st.info("등록된 품목이 없습니다.")
