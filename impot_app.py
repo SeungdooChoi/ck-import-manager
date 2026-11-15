@@ -1474,13 +1474,22 @@ elif selected_tab == MENU_OPTIONS[1]:
     df_ledger = get_schedule_data('import_schedules', 'ALL')
 
     if not df_ledger.empty:
-        ledger_kw = st.text_input("🔍 Invoice / 관리번호 검색", key="ledger_kw",
-                                  placeholder="Invoice No. 또는 관리번호(CK·글로벌·두진) · 여러 개는 쉼표(,)로 구분")
+        kc1, kc2 = st.columns(2)
+        inv_kw = kc1.text_input("🔍 Invoice 검색", key="ledger_inv_kw",
+                                placeholder="Invoice No. (일부만 입력 · 여러 개는 쉼표로 구분)")
+        ck_kw = kc2.text_input("🔍 관리번호 검색", key="ledger_ck_kw",
+                               placeholder="CK·글로벌·두진 번호 (일부만 입력 · 여러 개는 쉼표로 구분)")
         with st.expander("🔍 조회 필터 (업체 / 품목 / 도착일)", expanded=not IS_MOBILE):
             df_ledger = render_search_filters(df_ledger, "ledger")
-        df_ledger = filter_by_keywords(df_ledger, ledger_kw, ['invoice_no', 'ck_code', 'global_code', 'doojin_code'])
-        if str(ledger_kw or '').strip():
+        df_ledger = filter_by_keywords(df_ledger, inv_kw, ['invoice_no'])
+        df_ledger = filter_by_keywords(df_ledger, ck_kw, ['ck_code', 'global_code', 'doojin_code'])
+        if str(inv_kw or '').strip() or str(ck_kw or '').strip():
             st.caption(f"검색 결과 {len(df_ledger)}건")
+
+        # ETD 최신순 정렬 (ETD 없는 건은 맨 뒤, 같은 ETD는 최근 등록 순)
+        df_ledger = (df_ledger.assign(_etd_sort=pd.to_datetime(df_ledger['etd'], errors='coerce'))
+                     .sort_values(['_etd_sort', 'id'], ascending=[False, False], na_position='last')
+                     .drop(columns='_etd_sort'))
 
         if df_ledger.empty:
             st.warning("조회 조건에 맞는 데이터가 없습니다.")
