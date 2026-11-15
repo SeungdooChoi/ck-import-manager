@@ -163,7 +163,7 @@ try:
                 ("clearance_info", "JSONB"), ("declaration_info", "JSONB"),
                 ("remaining_qty", "NUMERIC"), ("transport_status", "TEXT"),
                 ("status", "TEXT"), ("product_id", "INTEGER"), ("note", "TEXT"), ("quantity", "NUMERIC"), ("expected_date", "DATE"),
-                ("trade_terms", "TEXT"), ("freight", "NUMERIC")  # 거래조건(FOB 등) / 운임(참고용, 결제총액 미포함)
+                ("trade_terms", "TEXT"), ("freight", "NUMERIC"), ("unit", "TEXT")  # 거래조건(FOB 등) / 운임(참고용, 결제총액 미포함)
             ]
 
             # 1. Import Schedules 테이블 업데이트
@@ -658,7 +658,7 @@ def save_schedule(data, sid=None, table_name='import_schedules'):
                 'doc_acceptance', 'acceptance_rate', 'maturity_date', 'ext_maturity_date', 'acceptance_fee', 'discount_fee',
                 'payment_date', 'payment_amount', 'exchange_rate', 'balance', 'avg_exchange_rate', 'arrival_exchange_rate',
                 'clearance_info', 'declaration_info', 'remaining_qty', 'transport_status',
-                'trade_terms', 'freight', 'no_stock_sync'
+                'trade_terms', 'freight', 'no_stock_sync', 'unit'
             ]
             numeric_cols = ['quantity', 'unit_price', 'open_qty', 'doc_qty', 'box_qty', 'open_amount', 'doc_amount',
                             'actual_in_qty', 'acceptance_rate', 'acceptance_fee', 'discount_fee', 'payment_amount',
@@ -1186,6 +1186,7 @@ def parse_import_full_excel(df):
                 'doc_qty': get_val('doc_qty', safe_float_parse),
                 'box_qty': get_val('box_qty', safe_float_parse),
                 'unit2': get_val('unit2'),
+                'unit': str(get_val('unit')).strip(),
                 'unit_price': get_val('price', safe_float_parse),
                 'open_amount': get_val('open_amt', safe_float_parse),
                 'doc_amount': get_val('doc_amt', safe_float_parse),
@@ -1485,8 +1486,27 @@ elif selected_tab == MENU_OPTIONS[1]:
             render_ledger_cards(df_ledger, "ledger_m_shown", _open_from_ledger)
             st.stop()
 
+        # 표시 순서/이름만 정하고, 행 선택 시 수정 화면에는 전체 컬럼 값을 그대로 넘긴다
+        LEDGER_VIEW = [
+            ('ck_code', 'CK 관리번호', 'text'), ('global_code', '글로벌', 'text'), ('doojin_code', '두진', 'text'),
+            ('agency', '대행', 'text'), ('agency_contract', '대행계약서', 'text'), ('supplier', '수출자(수입자)', 'text'),
+            ('origin', '원산지', 'text'), ('product_name', '품명', 'text'), ('size', '사이즈', 'text'), ('packing', 'Packing', 'text'),
+            ('quantity', '오픈수량', '%.0f'), ('unit', '단위', 'text'), ('doc_qty', '서류수량', '%.0f'), ('box_qty', '박스수량', '%.0f'),
+            ('unit_price', '단가(USD)', '%.2f'), ('unit2', '단가단위', 'text'), ('open_amount', '오픈금액', '%.2f'), ('doc_amount', '서류금액', '%.2f'),
+            ('status_kr', '상태', 'text'), ('구분', '삼각', 'text'),
+            ('etd', 'ETD', 'date'), ('expected_date', 'ETA', 'date'), ('arrival_date', '입고일', 'date'),
+        ]
+        df_ledger = df_ledger.assign(status_kr=df_ledger['status'].map({k: v[0] for k, v in STATUS_LABEL.items()}).fillna(df_ledger['status']))
+        ledger_view = [v for v in LEDGER_VIEW if v[0] in df_ledger.columns]
+        ledger_cfg = {c: (st.column_config.TextColumn(lbl) if fmt == 'text'
+                          else st.column_config.DateColumn(lbl, format="YYYY-MM-DD") if fmt == 'date'
+                          else st.column_config.NumberColumn(lbl, format=fmt))
+                      for c, lbl, fmt in ledger_view}
+
         event = st.dataframe(
             df_ledger,
+            column_order=[c for c, _, _ in ledger_view],
+            column_config=ledger_cfg,
             use_container_width=True,
             height=600,
             hide_index=True,
@@ -1916,10 +1936,11 @@ elif selected_tab == MENU_OPTIONS[4]:
                         agency = c1.text_input("대행사", value=data.get('agency', ''))
                         agency_contract = c2.text_input("대행 계약서", value=data.get('agency_contract', ''))
 
-                        c1, c2, c3 = st.columns(3)
+                        c1, c2, c3, c4 = st.columns(4)
                         unit_price = c1.number_input("단가 (USD)", value=float(data.get('unit_price') or 0.0), step=0.01, format="%.2f")
                         unit2 = c2.text_input("단가 단위", value=data.get('unit2', 'kg'))
                         quantity = c3.number_input("오픈 수량", value=float(data.get('quantity') or 0.0))
+                        unit = c4.text_input("수량 단위", value=data.get('unit') or '', placeholder="CTN")
 
                         c1, c2, c3 = st.columns(3)
                         doc_qty = c1.number_input("서류 수량", value=float(data.get('doc_qty') or 0.0))
@@ -2072,7 +2093,7 @@ elif selected_tab == MENU_OPTIONS[4]:
                                 'ck_code': ck_code, 'global_code': global_code, 'doojin_code': doojin_code,
                                 'product_id': final_pid, 'agency': agency, 'agency_contract': agency_contract,
                                 'supplier': supplier, 'origin': id_origin, 'size': id_size, 'packing': packing,
-                                'unit_price': unit_price, 'unit2': unit2,
+                                'unit_price': unit_price, 'unit2': unit2, 'unit': unit,
                                 'quantity': quantity, 'open_qty': quantity, 'doc_qty': doc_qty, 'box_qty': box_qty,
                                 'open_amount': open_amount, 'doc_amount': doc_amount,
                                 'tt_check': tt_check, 'bank': bank, 'usance': usance, 'at_sight': at_sight,
