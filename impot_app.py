@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from sqlalchemy import text
 from datetime import datetime, timedelta
 import time
@@ -680,6 +681,7 @@ def save_schedule(data, sid=None, table_name='import_schedules'):
             params = {}
             for k in use_cols:
                 val = data.get(k)
+                if isinstance(val, np.generic): val = val.item()   # numpy.int64 등 -> 파이썬 기본 타입
                 if k in numeric_cols:
                     if val is None or str(val).strip() == '': params[k] = 0
                     else:
@@ -833,13 +835,38 @@ def safe_date_parse(val):
     try:
         if isinstance(val, datetime): return val.strftime('%Y-%m-%d')
         s_val = str(val).strip()
-        if re.match(r'^\d{2}/\d{2}/\d{2}$', s_val): # 25/01/01
+        if re.match(r'^\d{2}/\d{1,2}/\d{1,2}$', s_val): # 25/01/01, 25/5/19
             dt = datetime.strptime(s_val, "%y/%m/%d")
             if dt.year < 2000: dt = dt.replace(year=dt.year+2000)
             return dt.strftime('%Y-%m-%d')
         if re.match(r'^\d{4}-\d{2}-\d{2}$', s_val): return datetime.strptime(s_val, "%Y-%m-%d").strftime('%Y-%m-%d')
         return pd.to_datetime(val).strftime('%Y-%m-%d')
     except: return None
+
+def parse_md_date(val, base, mode):
+    """장부의 개설일/결제일/통관일/신고일은 '1/2', '7/15'처럼 연도 없이 월/일만 적혀 있다.
+    기준일(ETA) 근처로 연도를 추정한다.
+      mode='before': 기준일 이전(L/C 개설일 등) 중 가장 가까운 날짜
+      mode='after' : 기준일 60일 전 이후(통관/신고/결제 등) 중 가장 이른 날짜
+    연도가 있는 값은 safe_date_parse 그대로 처리한다."""
+    if isinstance(val, str):
+        m = re.match(r'^\s*(\d{1,2})/(\d{1,2})\s*(\(.*\))?\s*$', val)
+        if m:
+            mo, dd = int(m.group(1)), int(m.group(2))
+            def mk(y):
+                try: return datetime(y, mo, dd).date()
+                except ValueError: return None
+            if mode == 'before':
+                for y in (base.year + 1, base.year, base.year - 1):
+                    d = mk(y)
+                    if d and d <= base: return d.strftime('%Y-%m-%d')
+            else:
+                lo = base - timedelta(days=60)
+                for y in (base.year - 1, base.year, base.year + 1, base.year + 2):
+                    d = mk(y)
+                    if d and d >= lo: return d.strftime('%Y-%m-%d')
+            return None
+    return safe_date_parse(val)
 
 def parse_json_field(val):
     """JSONB 컬럼은 psycopg2가 이미 list/dict로 파싱해서 돌려주므로, 문자열일 때만 json.loads 적용"""
@@ -1128,16 +1155,22 @@ def parse_import_full_excel(df):
                 col = col_map.get(key)
                 return parser(row.get(col)) if col else (0.0 if parser == safe_float_parse else None)
 
+            # 연도 없는 'M/D' 날짜의 연도 추정 기준일: ETA -> 실입고일 -> 오늘
+            base_str = get_val('eta', safe_date_parse) or get_val('arrival_date', safe_date_parse)
+            base_dt = datetime.strptime(base_str, '%Y-%m-%d').date() if base_str else get_kst_today()
+            d_before = lambda v: parse_md_date(v, base_dt, 'before')
+            d_after = lambda v: parse_md_date(v, base_dt, 'after')
+
             clearance_list = []
             for d_col, q_col, r_col in clearance_col_groups:
-                d_val = safe_date_parse(row.get(d_col)) if d_col else None
+                d_val = d_after(row.get(d_col)) if d_col else None
                 q_val = safe_float_parse(row.get(q_col)) if q_col else 0.0
                 r_val = safe_float_parse(row.get(r_col)) if r_col else 0.0
                 if d_val or q_val: clearance_list.append({"date": d_val, "qty": q_val, "rate": r_val})
 
             declaration_list = []
             for d_col, n_col in declaration_col_groups:
-                d_val = safe_date_parse(row.get(d_col)) if d_col else None
+                d_val = d_after(row.get(d_col)) if d_col else None
                 n_raw = row.get(n_col) if n_col else None
                 n_val = str(n_raw).strip() if pd.notna(n_raw) else ''
                 if d_val or n_val: declaration_list.append({"date": d_val, "no": n_val})
@@ -1158,12 +1191,12 @@ def parse_import_full_excel(df):
                 'doc_amount': get_val('doc_amt', safe_float_parse),
                 'tt_check': get_val('tt'), 'bank': get_val('bank'),
                 'usance': get_val('usance'), 'at_sight': get_val('at_sight'),
-                'open_date': get_val('open_date', safe_date_parse),
+                'open_date': get_val('open_date', d_before),
                 'lc_no': get_val('lc_no'), 'invoice_no': get_val('inv_no'),
                 'bl_no': get_val('bl_no'), 'lg_no': get_val('lg_no'), 'insurance': get_val('insurance'),
                 'customs_broker_date': get_val('broker_date', safe_date_parse),
                 'etd': get_val('etd', safe_date_parse),
-                'expected_date': get_val('eta', safe_date_parse) or get_kst_today(),
+                'expected_date': get_val('eta', safe_date_parse) or get_val('arrival_date', safe_date_parse) or get_kst_today(),
                 'arrival_date': get_val('arrival_date', safe_date_parse),
                 'warehouse': get_val('wh'), 
                 'actual_in_qty': get_val('real_in_qty', safe_float_parse),
@@ -1174,7 +1207,7 @@ def parse_import_full_excel(df):
                 'ext_maturity_date': get_val('ext_date', safe_date_parse),
                 'acceptance_fee': get_val('acc_fee', safe_float_parse),
                 'discount_fee': get_val('dis_fee', safe_float_parse),
-                'payment_date': get_val('pay_date', safe_date_parse),
+                'payment_date': get_val('pay_date', d_after),
                 'payment_amount': get_val('pay_amt', safe_float_parse),
                 'exchange_rate': get_val('ex_rate', safe_float_parse),
                 'balance': get_val('balance', safe_float_parse),
