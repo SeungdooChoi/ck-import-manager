@@ -1050,6 +1050,18 @@ def render_ledger_cards(df, page_key, on_select, page_size=20):
             st.session_state[page_key] = shown + page_size
             st.rerun()
 
+def filter_by_keywords(df, kw, cols):
+    """Invoice/관리번호 등 키워드 검색. 쉼표로 여러 개를 넣으면 하나라도 포함된 건을 보여준다(공백/대소문자 무시)."""
+    terms = [re.sub(r'\s+', '', t).lower() for t in str(kw or '').split(',') if t.strip()]
+    cols = [c for c in cols if c in df.columns]
+    if not terms or not cols or df.empty: return df
+    mask = pd.Series(False, index=df.index)
+    for c in cols:
+        norm = df[c].fillna('').astype(str).str.replace(r'\s+', '', regex=True).str.lower()
+        for t in terms:
+            mask |= norm.str.contains(t, regex=False)
+    return df[mask]
+
 def render_search_filters(df, key_prefix):
     """업체(공급/수출자) / 품목 / 도착일(ETA) 기준 조회 필터 위젯을 그리고, 필터링된 df를 반환"""
     if df.empty: return df
@@ -1462,8 +1474,13 @@ elif selected_tab == MENU_OPTIONS[1]:
     df_ledger = get_schedule_data('import_schedules', 'ALL')
 
     if not df_ledger.empty:
+        ledger_kw = st.text_input("🔍 Invoice / 관리번호 검색", key="ledger_kw",
+                                  placeholder="Invoice No. 또는 관리번호(CK·글로벌·두진) · 여러 개는 쉼표(,)로 구분")
         with st.expander("🔍 조회 필터 (업체 / 품목 / 도착일)", expanded=not IS_MOBILE):
             df_ledger = render_search_filters(df_ledger, "ledger")
+        df_ledger = filter_by_keywords(df_ledger, ledger_kw, ['invoice_no', 'ck_code', 'global_code', 'doojin_code'])
+        if str(ledger_kw or '').strip():
+            st.caption(f"검색 결과 {len(df_ledger)}건")
 
         if df_ledger.empty:
             st.warning("조회 조건에 맞는 데이터가 없습니다.")
