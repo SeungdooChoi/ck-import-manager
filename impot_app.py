@@ -10,6 +10,7 @@ import io
 import json
 import uuid
 import html as _html
+import itertools
 
 # ==========================================
 # 0. 기본 설정 및 스타일
@@ -145,6 +146,8 @@ try:
 
             # 과거 장부 일괄 이관분처럼 재고(stock_by_lot)를 자동 생성하면 안 되는 건 표시용
             s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS no_stock_sync BOOLEAN DEFAULT FALSE;"))
+            # expected_date는 필수값이라 ETA가 비어 있는 건은 임의 날짜가 들어간다. 진행현황에서 '미정'으로 구분하기 위한 표시
+            s.execute(text("ALTER TABLE import_schedules ADD COLUMN IF NOT EXISTS eta_tbd BOOLEAN DEFAULT FALSE;"))
 
             # 품목코드 조합표: 수출자+품명+원산지+사이즈+Packing -> 품목코드 (같은 품명/원산지/사이즈라도 코드가 갈리는 경우 대응)
             s.execute(text("""
@@ -631,7 +634,7 @@ def save_schedule(data, sid=None, table_name='import_schedules'):
                 'doc_acceptance', 'acceptance_rate', 'maturity_date', 'ext_maturity_date', 'acceptance_fee', 'discount_fee',
                 'payment_date', 'payment_amount', 'exchange_rate', 'balance', 'avg_exchange_rate', 'arrival_exchange_rate',
                 'clearance_info', 'declaration_info', 'remaining_qty', 'transport_status',
-                'trade_terms', 'freight', 'no_stock_sync', 'unit'
+                'trade_terms', 'freight', 'no_stock_sync', 'unit', 'eta_tbd'
             ]
             numeric_cols = ['quantity', 'unit_price', 'open_qty', 'doc_qty', 'box_qty', 'open_amount', 'doc_amount',
                             'actual_in_qty', 'acceptance_rate', 'acceptance_fee', 'discount_fee', 'payment_amount',
@@ -878,25 +881,148 @@ def _esc(v, default='-'):
 
 STATUS_LABEL = {'PENDING': ('진행중', 'status-pending'), 'ARRIVED': ('입고완료', 'status-arrived'), 'CANCELED': ('취소', 'status-canceled')}
 
-def render_progress_cards(df):
-    """수입진행현황 모바일 카드뷰: 착지 > 품명/사이즈 카드 > 입고 건(날짜/수출자·단가/수량)"""
+def _to_date(v):
+    d = pd.to_datetime(v, errors='coerce')
+    return None if pd.isna(d) else d.date()
+
+def progress_kind(r, today):
+    """수입진행상황 대상 판정. 대상이 아니면 None, 대상이면 '선적예정' 또는 '운송중'.
+    대상: 아직 입고되지 않았고(PENDING, 입고일 없음) ETA가 지나지 않은 건(ETA 미정 포함).
+    ETD(출항)가 오늘 이전이면 운송중, ETD가 앞으로이거나 없으면 선적예정."""
+    if r.get('status') != 'PENDING' or _to_date(r.get('arrival_date')): return None
+    tbd = r.get('eta_tbd')
+    tbd = bool(tbd) if pd.notna(tbd) else False
+    eta = _to_date(r.get('expected_date'))
+    if not tbd and (eta is None or eta < today): return None
+    etd = _to_date(r.get('etd'))
+    return '운송중' if etd and etd <= today else '선적예정'
+
+def build_progress_rows(df, today):
+    rows = []
+    for _, r in df.iterrows():
+        kind = progress_kind(r, today)
+        if not kind: continue
+        tbd = r.get('eta_tbd')
+        tbd = bool(tbd) if pd.notna(tbd) else False
+        qty = r.get('quantity')
+        pv = r.get('unit_price')
+        rows.append(dict(
+            kind=kind, tbd=tbd, eta=None if tbd else _to_date(r.get('expected_date')), etd=_to_date(r.get('etd')),
+            ck=r.get('ck_code'), product=r.get('product_name'), size=r.get('size'), packing=r.get('packing'),
+            supplier=r.get('supplier'), qty=float(qty) if pd.notna(qty) else 0.0, unit=r.get('unit'),
+            price=float(pv) if pd.notna(pv) and float(pv) > 0 else None, dest=r.get('destination'), note=r.get('note')))
+    rows.sort(key=lambda x: (x['tbd'], x['eta'] or datetime.max.date(), str(x['product'] or '')))
+    return rows
+
+PROGRESS_CSS = """
+<style>
+.pb-sum { display:flex; flex-wrap:wrap; gap:8px; margin:4px 0 14px; }
+.pb-chip { padding:6px 12px; border-radius:8px; font-size:13px; background:rgba(135,142,149,.15); border:1px solid rgba(135,142,149,.25); }
+.pb-chip b { font-size:15px; margin-left:2px; }
+.pb-ship { background:rgba(250,176,5,.16) !important; border-color:rgba(250,176,5,.45) !important; }
+.pb-move { background:rgba(51,154,240,.16) !important; border-color:rgba(51,154,240,.45) !important; }
+.pb-dest { font-weight:700; font-size:15px; margin:18px 0 6px; }
+.pb-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; margin-bottom:12px; }
+table.pb { width:100%; border-collapse:collapse; font-size:13px; line-height:1.4; }
+table.pb th { position:sticky; top:0; text-align:left; padding:9px 10px; font-weight:700; white-space:nowrap;
+              background:rgba(135,142,149,.18); border-bottom:2px solid rgba(135,142,149,.45); }
+table.pb td { padding:8px 10px; border-bottom:1px solid rgba(135,142,149,.2); vertical-align:middle; }
+table.pb tbody tr:not(.pb-month):hover td { background:rgba(51,154,240,.07); }
+table.pb .num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+table.pb .nw { white-space:nowrap; }
+table.pb .prod { font-weight:700; }
+table.pb .muted { color:rgba(135,142,149,1); font-size:12px; }
+table.pb .note { max-width:260px; color:rgba(135,142,149,1); font-size:12px; }
+tr.pb-month td { background:rgba(51,154,240,.12); font-weight:700; padding:7px 10px; border-bottom:1px solid rgba(51,154,240,.35); }
+tr.pb-month span { font-weight:400; margin-left:8px; font-size:12px; opacity:.8; }
+.pb-badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap; }
+.pb-badge.pb-ship { color:#e67700; } .pb-badge.pb-move { color:#1971c2; }
+.pb-dd { display:inline-block; margin-left:6px; padding:1px 7px; border-radius:999px; font-size:11px; font-weight:700;
+         background:rgba(135,142,149,.18); }
+.pb-dd.soon { background:rgba(250,176,5,.25); color:#e67700; }
+.pb-dd.urgent { background:rgba(240,62,62,.18); color:#e03131; }
+.pb-card { border:1px solid rgba(135,142,149,.3); border-radius:10px; margin:0 0 8px; padding:10px 12px; }
+.pb-card .t { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:4px 8px; font-size:14px; }
+.pb-card .r { display:flex; justify-content:space-between; flex-wrap:wrap; gap:2px 12px; font-size:12.5px; margin-top:5px; }
+.pb-card .m { font-size:12px; opacity:.75; margin-top:3px; }
+.pb-month-h { font-weight:700; margin:14px 0 6px; padding:6px 10px; border-radius:8px; background:rgba(51,154,240,.12); font-size:13.5px; }
+</style>
+"""
+
+def _pb_month(r):
+    return 'ETA 미정' if r['tbd'] else r['eta'].strftime('%Y년 %m월')
+
+def _pb_dday(r, today):
+    if r['tbd'] or r['eta'] is None: return ''
+    d = (r['eta'] - today).days
+    cls = 'urgent' if d <= 7 else ('soon' if d <= 14 else '')
+    return f"<span class='pb-dd {cls}'>{'오늘' if d == 0 else f'D-{d}'}</span>"
+
+def _pb_qty(r):
+    return f"{r['qty']:,.0f}" + (f" {_html.escape(str(r['unit']).strip())}" if pd.notna(r['unit']) and str(r['unit']).strip() else "")
+
+def _pb_group_label(rows_in_month):
+    units = {str(x['unit']).strip() for x in rows_in_month if pd.notna(x['unit']) and str(x['unit']).strip()}
+    total = sum(x['qty'] for x in rows_in_month)
+    return f"{len(rows_in_month)}건" + (f" · {total:,.0f} {_html.escape(next(iter(units)))}" if len(units) == 1 else "")
+
+def progress_table_html(rows, today):
+    out = ("<div class='pb-wrap'><table class='pb'><thead><tr>"
+           "<th>ETA</th><th>상태</th><th>CK</th><th>품명</th><th>사이즈</th><th>Packing</th><th>수출자</th>"
+           "<th class='num'>수량</th><th class='num'>단가(USD)</th><th>ETD</th><th>비고</th></tr></thead><tbody>")
+    for month, grp in itertools.groupby(rows, key=_pb_month):
+        grp = list(grp)
+        out += f"<tr class='pb-month'><td colspan='11'>{month}<span>{_pb_group_label(grp)}</span></td></tr>"
+        for r in grp:
+            eta_s = 'ETA 미정' if r['tbd'] else r['eta'].strftime('%y/%m/%d')
+            etd_s = r['etd'].strftime('%y/%m/%d') if r['etd'] else '-'
+            cls = 'pb-ship' if r['kind'] == '선적예정' else 'pb-move'
+            note = str(r['note']).strip() if pd.notna(r['note']) else ''
+            if note.lower() == 'nan': note = ''
+            price = f"${r['price']:,.2f}" if r['price'] else '-'
+            out += (f"<tr><td class='nw'><b>{eta_s}</b>{_pb_dday(r, today)}</td>"
+                    f"<td><span class='pb-badge {cls}'>{r['kind']}</span></td>"
+                    f"<td class='nw muted'>{_esc(r['ck'])}</td><td class='prod'>{_esc(r['product'])}</td>"
+                    f"<td class='nw'>{_esc(r['size'])}</td><td class='muted'>{_esc(r['packing'])}</td><td>{_esc(r['supplier'])}</td>"
+                    f"<td class='num'><b>{_pb_qty(r)}</b></td><td class='num'>{price}</td><td class='nw'>{etd_s}</td>"
+                    f"<td class='note' title='{_html.escape(note)}'>{_html.escape(note[:40]) + ('…' if len(note) > 40 else '')}</td></tr>")
+    return out + "</tbody></table></div>"
+
+def progress_cards_html(rows, today):
     out = ""
-    multi_dest = df['destination'].nunique() > 1
-    for dest, d_group in df.groupby('destination', dropna=False):
-        if multi_dest or str(dest).strip() != '기본 착지':
-            out += f"<div class='m-dest'>📍 착지 : {_esc(dest)}</div>"
-        for (p_name, size), p_group in d_group.groupby(['product_name', 'size'], dropna=False):
-            out += f"<div class='m-card'><div class='m-card-head'><b>{_esc(p_name)}</b><span class='sub'>{_esc(size)}</span></div>"
-            for _, row in p_group.sort_values(by='expected_date').iterrows():
-                eta = pd.to_datetime(row['expected_date']).strftime('%y/%m/%d') if pd.notna(row['expected_date']) else '-'
-                qty = f"{int(row['quantity']):,}" if pd.notna(row['quantity']) else "0"
-                pv = row.get('unit_price')
-                price = f"${float(pv):,.2f}" if pd.notna(pv) and float(pv) > 0 else ''
-                sup = _esc(row.get('supplier'))
-                cls = {'PENDING': 'cell-pending', 'ARRIVED': 'cell-arrived'}.get(row['status'], '')
-                out += f"<div class='m-ship {cls}'><span class='d'>{eta}</span><span class='s'>{sup} {price}</span><span class='q'>{qty}</span></div>"
-            out += "</div>"
-    st.markdown(out, unsafe_allow_html=True)
+    for month, grp in itertools.groupby(rows, key=_pb_month):
+        grp = list(grp)
+        out += f"<div class='pb-month-h'>{month} · {_pb_group_label(grp)}</div>"
+        for r in grp:
+            eta_s = 'ETA 미정' if r['tbd'] else r['eta'].strftime('%y/%m/%d')
+            etd_s = r['etd'].strftime('%y/%m/%d') if r['etd'] else '-'
+            cls = 'pb-ship' if r['kind'] == '선적예정' else 'pb-move'
+            price = f" · ${r['price']:,.2f}" if r['price'] else ''
+            out += (f"<div class='pb-card'><div class='t'><b>{_esc(r['product'])} <span style='font-weight:400'>{_esc(r['size'], '')}</span></b>"
+                    f"<span class='pb-badge {cls}'>{r['kind']}</span></div>"
+                    f"<div class='r'><span><b>ETA {eta_s}</b>{_pb_dday(r, today)}</span><span><b>{_pb_qty(r)}</b>{price}</span></div>"
+                    f"<div class='m'>{_esc(r['supplier'])} · ETD {etd_s} · {_esc(r['ck'])}</div></div>")
+    return out
+
+def render_progress_board(rows, today, mobile):
+    """수입진행상황: 요약 칩 + (PC) HTML 표 / (모바일) 카드. 착지가 여러 개면 착지별로 나눠서 보여준다."""
+    n_ship = sum(1 for r in rows if r['kind'] == '선적예정')
+    n_move = len(rows) - n_ship
+    units = {str(r['unit']).strip() for r in rows if pd.notna(r['unit']) and str(r['unit']).strip()}
+    total = f"<span class='pb-chip'>총 수량 <b>{sum(r['qty'] for r in rows):,.0f}</b>{' ' + _html.escape(next(iter(units))) if len(units) == 1 else ''}</span>"
+    st.markdown(PROGRESS_CSS + f"<div class='pb-sum'><span class='pb-chip'>전체 <b>{len(rows)}</b>건</span>"
+                f"<span class='pb-chip pb-ship'>선적예정 <b>{n_ship}</b></span><span class='pb-chip pb-move'>운송중 <b>{n_move}</b></span>{total}</div>",
+                unsafe_allow_html=True)
+    dests = {str(r['dest']).strip() for r in rows if pd.notna(r['dest']) and str(r['dest']).strip()}
+    render = progress_cards_html if mobile else progress_table_html
+    if len(dests) > 1:
+        for dest in sorted(dests) + ['']:
+            part = [r for r in rows if (str(r['dest']).strip() if pd.notna(r['dest']) else '') == dest]
+            if part:
+                st.markdown(f"<div class='pb-dest'>📍 착지 : {_html.escape(dest) if dest else '미지정'} ({len(part)}건)</div>" + render(part, today),
+                            unsafe_allow_html=True)
+    else:
+        st.markdown(render(rows, today), unsafe_allow_html=True)
 
 def render_ledger_cards(df, page_key, on_select, page_size=20):
     """수입장부 모바일 카드뷰: 핵심 항목만 요약 + 상세/수정 버튼, '더 보기'로 페이지 확장"""
@@ -1207,7 +1333,8 @@ def parse_import_full_excel(df):
                 # 입고일이 있는 건은 입고완료로 이관하되 재고는 만들지 않는다(과거 장부 이관 시 재고 중복/입고예정 오표시 방지).
                 # 입고일이 없는 건만 PENDING(→ 재고장 '입고예정'에 표시)
                 'status': 'ARRIVED' if get_val('arrival_date', safe_date_parse) else 'PENDING',
-                'no_stock_sync': True
+                'no_stock_sync': True,
+                'eta_tbd': not get_val('eta', safe_date_parse)
             }
             valid_data.append(data)
         except Exception as e:
@@ -1315,132 +1442,24 @@ selected_tab = st.session_state['active_tab']
 
 # --- TAB 1: 수입진행상황 ---
 if selected_tab == MENU_OPTIONS[0]:
-    st.markdown("### 📅 수입 진행 현황판")
-    
-    # 피벗 스타일 테이블 CSS
-    st.markdown("""
-    <style>
-        .progress-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 30px; }
-        .progress-table th, .progress-table td { border: 1px solid #adb5bd; text-align: center; vertical-align: middle; }
-        .progress-table th { background-color: #f1f3f5; font-weight: bold; padding: 8px; color: #343a40; }
-        .progress-table td { padding: 4px; }
-        .progress-table .prod-cell { font-weight: bold; background-color: #f8f9fa; text-align: center; }
-        .progress-table .size-cell { background-color: #f8f9fa; }
-        .progress-table .date-cell { font-weight: bold; font-size: 12px; border-bottom: 1px dotted #ced4da; }
-        .progress-table .qty-cell { font-weight: normal; color: #495057; border-bottom: 1px dotted #ced4da; }
-        .progress-table .sup-cell { font-weight: normal; font-size: 11px; color: #868e96; }
+    st.markdown("### 수입 진행 현황판")
+    st.caption("선적예정·운송중인 건만 표시합니다. 입고완료 / ETA 경과 / 취소 건은 제외됩니다. "
+               "(ETD가 오늘 이전이면 운송중, 이후면 선적예정)")
 
-        /* 상태별 배경색 (스크린샷 참고) */
-        .cell-pending { background-color: #fff3bf !important; } /* 노란색 (진행중) */
-        .cell-arrived { background-color: #3bc9db !important; color: white; } /* 파란색 (입고완료) */
-        .cell-default { background-color: #ffffff !important; }
-    </style>
-    """, unsafe_allow_html=True)
-    
     df = get_schedule_data('import_schedules', 'ALL')
+    today = get_kst_today()
+    cand = df[df.apply(lambda r: progress_kind(r, today) is not None, axis=1)] if not df.empty else df
 
-    if df.empty:
-        st.info("등록된 수입 일정이 없습니다.")
+    if cand.empty:
+        st.info("선적예정 또는 운송중인 수입 건이 없습니다.")
     else:
-        # CANCELED(취소) 건은 현황판에서 제외
-        df = df[df['status'] != 'CANCELED']
-
         with st.expander("🔍 조회 필터 (업체 / 품목 / 도착일)"):
-            df = render_search_filters(df, "dash")
+            cand = render_search_filters(cand, "dash")
 
-        if df.empty:
+        if cand.empty:
             st.warning("조회 조건에 맞는 데이터가 없습니다.")
-            st.stop()
-
-        # 착지(destination) 빈 값 처리
-        df['destination'] = df['destination'].fillna('기본 착지').replace('', '기본 착지')
-
-        if IS_MOBILE:
-            render_progress_cards(df)
-            st.stop()
-
-        html_content = ""
-        
-        # 1. 착지(Destination) 별로 먼저 그룹화
-        dest_groups = df.groupby('destination', dropna=False)
-        
-        for dest, d_group in dest_groups:
-            dest_str = str(dest).strip()
-            
-            # 2. 품명, 사이즈로 그룹화
-            prod_groups = d_group.groupby(['product_name', 'size'], dropna=False)
-            
-            # 테이블 레이아웃을 안 깨지게 하기 위해 가장 스케줄이 많은 건수 계산 (최소 5칸 확보)
-            max_cols = prod_groups.size().max()
-            if pd.isna(max_cols) or max_cols < 5: 
-                max_cols = 5
-            
-            html_content += f"<table class='progress-table'>"
-            
-            # 여러 착지가 있거나 명시된 경우 하위 그룹 헤더(착지명) 추가
-            if dest_str != '기본 착지' or len(dest_groups) > 1:
-                html_content += f"<thead><tr><th colspan='{max_cols + 2}' style='background-color:#e9ecef; text-align:center; font-size: 14px;'>착지 : {dest_str}</th></tr></thead>"
-            
-            html_content += f"""
-              <thead>
-                <tr>
-                  <th style="width: 18%;">품명</th>
-                  <th style="width: 12%;">사이즈</th>
-                  <th colspan="{max_cols}">입고일(ETA) / 수량 / 수출자·단가</th>
-                </tr>
-              </thead>
-              <tbody>
-            """
-
-            # 각 품목/사이즈 별로 행(Row) 생성
-            for (p_name, size), p_group in prod_groups:
-                # 날짜순 정렬
-                p_group = p_group.sort_values(by='expected_date')
-
-                p_name_str = p_name if pd.notna(p_name) and str(p_name).strip() != '' else '-'
-                size_str = size if pd.notna(size) and str(size).strip() != '' else '-'
-
-                date_cells = ""
-                qty_cells = ""
-                sup_cells = ""
-
-                # 가로로 나열될 날짜/수량/수출자·단가 셀 생성
-                for _, row in p_group.iterrows():
-                    eta = pd.to_datetime(row['expected_date']).strftime('%y/%m/%d') if pd.notna(row['expected_date']) else '-'
-                    qty = f"{int(row['quantity']):,}" if pd.notna(row['quantity']) else "0"
-                    status = row['status']
-                    supplier_str = str(row['supplier']).strip() if pd.notna(row.get('supplier')) and str(row.get('supplier')).strip() else '-'
-                    price_val = row.get('unit_price')
-                    price_str = f"${float(price_val):,.2f}" if pd.notna(price_val) and float(price_val) > 0 else '-'
-
-                    # 상태에 따른 배경색 클래스 할당
-                    bg_class = "cell-default"
-                    if status == 'PENDING':
-                        bg_class = "cell-pending"
-                    elif status == 'ARRIVED':
-                        bg_class = "cell-arrived"
-
-                    date_cells += f"<td class='date-cell {bg_class}'>{eta}</td>"
-                    qty_cells += f"<td class='qty-cell {bg_class}'>{qty}</td>"
-                    sup_cells += f"<td class='sup-cell {bg_class}'>{supplier_str}<br>{price_str}</td>"
-
-                # 빈 칸 채우기 (테이블 레이아웃 유지용)
-                empty_cols = max_cols - len(p_group)
-                for _ in range(empty_cols):
-                    date_cells += "<td class='date-cell cell-default'></td>"
-                    qty_cells += "<td class='qty-cell cell-default'></td>"
-                    sup_cells += "<td class='sup-cell cell-default'></td>"
-
-                # 3줄을 묶어서 하나의 품목 행으로 렌더링 (날짜 줄, 수량 줄, 수출자·단가 줄)
-                tr1 = f"<tr><td rowspan='3' class='prod-cell'>{p_name_str}</td><td rowspan='3' class='size-cell'>{size_str}</td>{date_cells}</tr>"
-                tr2 = f"<tr>{qty_cells}</tr>"
-                tr3 = f"<tr>{sup_cells}</tr>"
-
-                html_content += tr1 + tr2 + tr3
-                
-            html_content += "</tbody></table>"
-            
-        st.markdown(f"<div class='progress-wrap'>{html_content}</div>", unsafe_allow_html=True)
+        else:
+            render_progress_board(build_progress_rows(cand, today), today, IS_MOBILE)
 
 # --- TAB 2: 수입장부 (상세) ---
 elif selected_tab == MENU_OPTIONS[1]:
@@ -1951,9 +1970,11 @@ elif selected_tab == MENU_OPTIONS[4]:
 
                     with ft2:
                         st.markdown("<div class='form-header'>일정 및 물류 정보</div>", unsafe_allow_html=True)
-                        c1, c2 = st.columns(2)
+                        c1, c2, c3 = st.columns(3)
                         etd = c1.date_input("ETD (출항)", value=safe_date_parse(data.get('etd')))
                         eta = c2.date_input("ETA (입항/예정일)", value=safe_date_parse(data.get('expected_date')) or get_kst_today())
+                        eta_tbd = c3.checkbox("ETA 미정", value=bool(data.get('eta_tbd')) if pd.notna(data.get('eta_tbd')) else False,
+                                              help="ETA가 정해지지 않은 건. 수입진행상황에 'ETA 미정'으로 계속 표시됩니다.")
 
                         c1, c2, c3 = st.columns(3)
                         arrival_date = c1.date_input("실 입고일", value=safe_date_parse(data.get('arrival_date')))
@@ -2090,7 +2111,7 @@ elif selected_tab == MENU_OPTIONS[4]:
                                 'tt_check': tt_check, 'bank': bank, 'usance': usance, 'at_sight': at_sight,
                                 'lc_no': lc_no, 'open_date': open_date,
                                 'invoice_no': invoice_no, 'bl_no': bl_no, 'lg_no': lg_no, 'insurance': insurance,
-                                'etd': etd, 'expected_date': eta, 'arrival_date': arrival_date, 'customs_broker_date': customs_broker_date,
+                                'etd': etd, 'expected_date': eta, 'eta_tbd': eta_tbd, 'arrival_date': arrival_date, 'customs_broker_date': customs_broker_date,
                                 'warehouse': warehouse, 'destination': destination, 'actual_in_qty': actual_in_qty,
                                 'remaining_qty': remaining_qty, 'transport_status': transport_status,
                                 'arrival_exchange_rate': arrival_exchange_rate,
