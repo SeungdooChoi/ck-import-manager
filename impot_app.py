@@ -924,33 +924,28 @@ PROGRESS_CSS = """
 .pb-dest { font-weight:700; font-size:15px; margin:18px 0 6px; }
 .pb-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; margin-bottom:12px; }
 table.pb { width:100%; border-collapse:collapse; font-size:13px; line-height:1.4; }
-table.pb th { position:sticky; top:0; text-align:left; padding:9px 10px; font-weight:700; white-space:nowrap;
-              background:rgba(135,142,149,.18); border-bottom:2px solid rgba(135,142,149,.45); }
-table.pb td { padding:8px 10px; border-bottom:1px solid rgba(135,142,149,.2); vertical-align:middle; }
-table.pb tbody tr:not(.pb-month):hover td { background:rgba(51,154,240,.07); }
-table.pb .num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
-table.pb .nw { white-space:nowrap; }
-table.pb .prod { font-weight:700; }
-table.pb .muted { color:rgba(135,142,149,1); font-size:12px; }
-table.pb .note { max-width:260px; color:rgba(135,142,149,1); font-size:12px; }
-tr.pb-month td { background:rgba(51,154,240,.12); font-weight:700; padding:7px 10px; border-bottom:1px solid rgba(51,154,240,.35); }
-tr.pb-month span { font-weight:400; margin-left:8px; font-size:12px; opacity:.8; }
-.pb-badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap; }
-.pb-badge.pb-ship { color:#e67700; } .pb-badge.pb-move { color:#1971c2; }
-.pb-dd { display:inline-block; margin-left:6px; padding:1px 7px; border-radius:999px; font-size:11px; font-weight:700;
-         background:rgba(135,142,149,.18); }
-.pb-dd.soon { background:rgba(250,176,5,.25); color:#e67700; }
-.pb-dd.urgent { background:rgba(240,62,62,.18); color:#e03131; }
+table.pb th { text-align:center; padding:9px 10px; font-weight:700; white-space:nowrap;
+              background:rgba(135,142,149,.18); border:1px solid rgba(135,142,149,.35); }
+table.pb td { padding:7px 10px; border:1px solid rgba(135,142,149,.3); vertical-align:middle; text-align:center; }
+table.pb td.prod { font-weight:700; text-align:left; background:rgba(135,142,149,.08); }
+table.pb td.sz { white-space:nowrap; background:rgba(135,142,149,.08); }
+table.pb td.pr { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; background:rgba(135,142,149,.08); }
+table.pb td.pb-d { min-width:104px; white-space:nowrap; font-size:12.5px; border-bottom:1px dotted rgba(135,142,149,.4); }
+table.pb td.pb-q { font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; }
+table.pb td.pb-e { background:transparent; }
+td.pb-ship { background:rgba(250,176,5,.16); } td.pb-move { background:rgba(51,154,240,.16); }
+.pb-dd { display:inline-block; margin-left:5px; padding:1px 6px; border-radius:999px; font-size:11px; font-weight:700; background:rgba(135,142,149,.2); }
+.pb-dd.soon { background:rgba(250,176,5,.3); color:#e67700; }
+.pb-dd.urgent { background:rgba(240,62,62,.2); color:#e03131; }
 .pb-card { border:1px solid rgba(135,142,149,.3); border-radius:10px; margin:0 0 8px; padding:10px 12px; }
-.pb-card .t { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:4px 8px; font-size:14px; }
-.pb-card .r { display:flex; justify-content:space-between; flex-wrap:wrap; gap:2px 12px; font-size:12.5px; margin-top:5px; }
-.pb-card .m { font-size:12px; opacity:.75; margin-top:3px; }
-.pb-month-h { font-weight:700; margin:14px 0 6px; padding:6px 10px; border-radius:8px; background:rgba(51,154,240,.12); font-size:13.5px; }
+.pb-card .t { display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:2px 8px; font-size:14px; margin-bottom:8px; }
+.pb-card .t .p { font-size:12.5px; opacity:.8; }
+.pb-chips { display:flex; flex-wrap:wrap; gap:6px; }
+.pb-ch { padding:6px 10px; border-radius:8px; border:1px solid rgba(135,142,149,.25); font-size:12.5px; min-width:92px; }
+.pb-ch.pb-ship { background:rgba(250,176,5,.16); } .pb-ch.pb-move { background:rgba(51,154,240,.16); }
+.pb-ch .q { font-weight:700; margin-top:2px; font-size:13px; }
 </style>
 """
-
-def _pb_month(r):
-    return 'ETA 미정' if r['tbd'] else r['eta'].strftime('%Y년 %m월')
 
 def _pb_dday(r, today):
     if r['tbd'] or r['eta'] is None: return ''
@@ -961,47 +956,45 @@ def _pb_dday(r, today):
 def _pb_qty(r):
     return f"{r['qty']:,.0f}" + (f" {_html.escape(str(r['unit']).strip())}" if pd.notna(r['unit']) and str(r['unit']).strip() else "")
 
-def _pb_group_label(rows_in_month):
-    units = {str(x['unit']).strip() for x in rows_in_month if pd.notna(x['unit']) and str(x['unit']).strip()}
-    total = sum(x['qty'] for x in rows_in_month)
-    return f"{len(rows_in_month)}건" + (f" · {total:,.0f} {_html.escape(next(iter(units)))}" if len(units) == 1 else "")
+def _pb_groups(rows):
+    """품명+사이즈+단가가 같은 입항 건끼리 묶는다. rows는 ETA 순(ETA 미정은 마지막)으로 정렬되어 있어야 한다.
+    묶음 순서는 가장 이른 입항일 순."""
+    groups = {}
+    for r in rows:
+        groups.setdefault((str(r['product'] or '').strip(), str(r['size'] or '').strip(), r['price']), []).append(r)
+    return list(groups.items())
+
+def _pb_date_label(r):
+    return 'ETA 미정' if r['tbd'] else r['eta'].strftime('%y/%m/%d')
 
 def progress_table_html(rows, today):
-    out = ("<div class='pb-wrap'><table class='pb'><thead><tr>"
-           "<th>ETA</th><th>상태</th><th>CK</th><th>품명</th><th>사이즈</th><th>Packing</th><th>수출자</th>"
-           "<th class='num'>수량</th><th class='num'>단가(USD)</th><th>ETD</th><th>비고</th></tr></thead><tbody>")
-    for month, grp in itertools.groupby(rows, key=_pb_month):
-        grp = list(grp)
-        out += f"<tr class='pb-month'><td colspan='11'>{month}<span>{_pb_group_label(grp)}</span></td></tr>"
+    """품명 | 사이즈 | 단가 | 입항일(가로 나열) 형태. 각 입항일 바로 아래 줄에 해당 수량을 표시한다."""
+    groups = _pb_groups(rows)
+    ncol = max(len(g) for _, g in groups)
+    out = ("<div class='pb-wrap'><table class='pb'><thead><tr><th>품명</th><th>사이즈</th><th>단가(USD)</th>"
+           f"<th colspan='{ncol}'>입항일</th></tr></thead><tbody>")
+    for (name, size, price), grp in groups:
+        date_cells = qty_cells = ""
         for r in grp:
-            eta_s = 'ETA 미정' if r['tbd'] else r['eta'].strftime('%y/%m/%d')
-            etd_s = r['etd'].strftime('%y/%m/%d') if r['etd'] else '-'
             cls = 'pb-ship' if r['kind'] == '선적예정' else 'pb-move'
-            note = str(r['note']).strip() if pd.notna(r['note']) else ''
-            if note.lower() == 'nan': note = ''
-            price = f"${r['price']:,.2f}" if r['price'] else '-'
-            out += (f"<tr><td class='nw'><b>{eta_s}</b>{_pb_dday(r, today)}</td>"
-                    f"<td><span class='pb-badge {cls}'>{r['kind']}</span></td>"
-                    f"<td class='nw muted'>{_esc(r['ck'])}</td><td class='prod'>{_esc(r['product'])}</td>"
-                    f"<td class='nw'>{_esc(r['size'])}</td><td class='muted'>{_esc(r['packing'])}</td><td>{_esc(r['supplier'])}</td>"
-                    f"<td class='num'><b>{_pb_qty(r)}</b></td><td class='num'>{price}</td><td class='nw'>{etd_s}</td>"
-                    f"<td class='note' title='{_html.escape(note)}'>{_html.escape(note[:40]) + ('…' if len(note) > 40 else '')}</td></tr>")
+            date_cells += f"<td class='pb-d {cls}'><b>{_pb_date_label(r)}</b>{_pb_dday(r, today)}</td>"
+            qty_cells += f"<td class='pb-q {cls}'>{_pb_qty(r)}</td>"
+        for _ in range(ncol - len(grp)):
+            date_cells += "<td class='pb-d pb-e'></td>"
+            qty_cells += "<td class='pb-q pb-e'></td>"
+        pr = f"${price:,.2f}" if price else "-"
+        out += (f"<tr><td rowspan='2' class='prod'>{_esc(name)}</td><td rowspan='2' class='sz'>{_esc(size)}</td>"
+                f"<td rowspan='2' class='pr'>{pr}</td>{date_cells}</tr><tr>{qty_cells}</tr>")
     return out + "</tbody></table></div>"
 
 def progress_cards_html(rows, today):
     out = ""
-    for month, grp in itertools.groupby(rows, key=_pb_month):
-        grp = list(grp)
-        out += f"<div class='pb-month-h'>{month} · {_pb_group_label(grp)}</div>"
-        for r in grp:
-            eta_s = 'ETA 미정' if r['tbd'] else r['eta'].strftime('%y/%m/%d')
-            etd_s = r['etd'].strftime('%y/%m/%d') if r['etd'] else '-'
-            cls = 'pb-ship' if r['kind'] == '선적예정' else 'pb-move'
-            price = f" · ${r['price']:,.2f}" if r['price'] else ''
-            out += (f"<div class='pb-card'><div class='t'><b>{_esc(r['product'])} <span style='font-weight:400'>{_esc(r['size'], '')}</span></b>"
-                    f"<span class='pb-badge {cls}'>{r['kind']}</span></div>"
-                    f"<div class='r'><span><b>ETA {eta_s}</b>{_pb_dday(r, today)}</span><span><b>{_pb_qty(r)}</b>{price}</span></div>"
-                    f"<div class='m'>{_esc(r['supplier'])} · ETD {etd_s} · {_esc(r['ck'])}</div></div>")
+    for (name, size, price), grp in _pb_groups(rows):
+        pr = f"${price:,.2f}" if price else "-"
+        chips = "".join(f"<div class='pb-ch {'pb-ship' if r['kind'] == '선적예정' else 'pb-move'}'>"
+                        f"<div><b>{_pb_date_label(r)}</b>{_pb_dday(r, today)}</div><div class='q'>{_pb_qty(r)}</div></div>" for r in grp)
+        out += (f"<div class='pb-card'><div class='t'><b>{_esc(name)} <span style='font-weight:400'>{_esc(size, '')}</span></b>"
+                f"<span class='p'>단가 {pr}</span></div><div class='pb-chips'>{chips}</div></div>")
     return out
 
 def render_progress_board(rows, today, mobile):
