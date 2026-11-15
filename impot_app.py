@@ -60,18 +60,6 @@ st.markdown("""
     /* 데이터프레임 스타일 */
     .stDataFrame { font-size: 13px; }
     
-    /* 상단 메뉴(nav_radio): 재고관리 앱과 같은 알약 버튼 (다른 라디오는 기본 모양 유지) */
-    .st-key-nav_radio div[role="radiogroup"] { flex-direction: row; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-    .st-key-nav_radio div[role="radiogroup"] > label {
-        background-color: rgba(135, 142, 149, 0.15); padding: 8px 16px; border-radius: 8px;
-        border: 1px solid rgba(135, 142, 149, 0.2); cursor: pointer; margin: 0; transition: all 0.2s ease-in-out;
-    }
-    .st-key-nav_radio div[role="radiogroup"] > label:hover { background-color: rgba(135, 142, 149, 0.25); border-color: rgba(135, 142, 149, 0.3); }
-    .st-key-nav_radio div[role="radiogroup"] > label:has(input:checked) { background-color: #339af0; border-color: #228be6; }
-    .st-key-nav_radio div[role="radiogroup"] > label:has(input:checked) p { color: #fff !important; font-weight: 800; }
-    .st-key-nav_radio div[role="radiogroup"] > label > div:first-of-type { display: none; }
-    .st-key-nav_radio div[role="radiogroup"] p { margin: 0; font-size: 14px; }
-
     /* 진행현황 표: 좁은 화면에서는 표 안에서만 가로 스크롤 */
     .progress-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
@@ -96,14 +84,6 @@ st.markdown("""
         h1 { font-size: 1.35rem !important; }
         h3 { font-size: 1.1rem !important; }
         .stDataFrame { font-size: 12px; }
-
-        /* 메뉴: 한 줄 가로 스와이프 */
-        .st-key-nav_radio div[role="radiogroup"] {
-            flex-wrap: nowrap; overflow-x: auto; gap: 6px; padding-bottom: 8px;
-            -webkit-overflow-scrolling: touch; scrollbar-width: none;
-        }
-        .st-key-nav_radio div[role="radiogroup"]::-webkit-scrollbar { display: none; }
-        .st-key-nav_radio div[role="radiogroup"] > label { flex: 0 0 auto; white-space: nowrap; padding: 8px 14px; }
 
         /* 터치 영역 확대 */
         .stButton button, .stFormSubmitButton button { min-height: 46px; }
@@ -1295,38 +1275,39 @@ MENU_OPTIONS = [
     "품목 관리"
 ]
 
-# [핵심] 네비게이션 상태 분리 (active_tab: 논리적 탭 / nav_radio: 위젯 키)
+# [핵심] 네비게이션 상태 분리 (active_tab: 논리적 탭 / nav_pills: 위젯 키)
 if 'active_tab' not in st.session_state:
     st.session_state['active_tab'] = MENU_OPTIONS[0]
 
-# 탭 변경 콜백 (위젯 -> 상태 동기화)
+# 탭 변경 콜백 (위젯 -> 상태 동기화). 선택된 알약을 다시 눌러 해제(None)해도 현재 탭을 유지한다.
 def on_tab_change():
-    st.session_state['active_tab'] = st.session_state['nav_radio']
+    v = st.session_state.get('nav_pills')
+    if v in MENU_OPTIONS:
+        st.session_state['active_tab'] = v
 
-# 다른 탭에서 프로그램으로 이동 요청이 온 경우(예: 장부에서 행 선택): 위젯 생성 전에 라디오 선택값까지 함께 바꾼다.
-# (라디오가 이전 탭에 눌린 채로 남으면 그 탭을 다시 눌러도 변경으로 인식되지 않아 돌아갈 수 없다)
+# 다른 탭에서 프로그램으로 이동 요청이 온 경우(예: 장부에서 행 선택): 위젯 생성 전에 선택값까지 함께 바꾼다.
 if 'nav_goto' in st.session_state:
     _goto = st.session_state.pop('nav_goto')
     if _goto in MENU_OPTIONS:
         st.session_state['active_tab'] = _goto
-        st.session_state['nav_radio'] = _goto
+        st.session_state['nav_pills'] = _goto
 if st.session_state['active_tab'] not in MENU_OPTIONS:
     st.session_state['active_tab'] = MENU_OPTIONS[0]
-if st.session_state.get('nav_radio') not in MENU_OPTIONS:
-    st.session_state['nav_radio'] = st.session_state['active_tab']
+if st.session_state.get('nav_pills') not in MENU_OPTIONS:   # 최초 진입 또는 선택 해제(None) 시 현재 탭으로 복원
+    st.session_state['nav_pills'] = st.session_state['active_tab']
 
 # [중요] 데이터프레임 선택 초기화용 키
 if 'df_key_tracker' not in st.session_state:
     st.session_state['df_key_tracker'] = 0
 
-# 네비게이션 (라디오 버튼)
-selected_tab_val = st.radio(
-    "메뉴 이동", 
-    MENU_OPTIONS, 
-    horizontal=True, 
+# 네비게이션 (알약 버튼)
+st.pills(
+    "메뉴 이동",
+    MENU_OPTIONS,
+    selection_mode="single",
     label_visibility="collapsed",
-    key="nav_radio", 
-    on_change=on_tab_change
+    key="nav_pills",
+    on_change=on_tab_change,
 )
 
 # 실제 뷰는 논리적 상태(active_tab)를 따름
