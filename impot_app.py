@@ -60,17 +60,17 @@ st.markdown("""
     /* 데이터프레임 스타일 */
     .stDataFrame { font-size: 13px; }
     
-    /* 상단 메뉴(nav_radio)만 탭처럼 스타일링 — 다른 라디오(상태 선택 등)는 기본 모양 유지 */
-    .st-key-nav_radio div[role="radiogroup"] > label > div:first-of-type {
-        display: none;
+    /* 상단 메뉴(nav_radio): 재고관리 앱과 같은 알약 버튼 (다른 라디오는 기본 모양 유지) */
+    .st-key-nav_radio div[role="radiogroup"] { flex-direction: row; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .st-key-nav_radio div[role="radiogroup"] > label {
+        background-color: rgba(135, 142, 149, 0.15); padding: 8px 16px; border-radius: 8px;
+        border: 1px solid rgba(135, 142, 149, 0.2); cursor: pointer; margin: 0; transition: all 0.2s ease-in-out;
     }
-    .st-key-nav_radio div[role="radiogroup"] {
-        flex-direction: row;
-        gap: 10px;
-        border-bottom: 1px solid #dee2e6;
-        padding-bottom: 5px;
-        margin-bottom: 15px;
-    }
+    .st-key-nav_radio div[role="radiogroup"] > label:hover { background-color: rgba(135, 142, 149, 0.25); border-color: rgba(135, 142, 149, 0.3); }
+    .st-key-nav_radio div[role="radiogroup"] > label:has(input:checked) { background-color: #339af0; border-color: #228be6; }
+    .st-key-nav_radio div[role="radiogroup"] > label:has(input:checked) p { color: #fff !important; font-weight: 800; }
+    .st-key-nav_radio div[role="radiogroup"] > label > div:first-of-type { display: none; }
+    .st-key-nav_radio div[role="radiogroup"] p { margin: 0; font-size: 14px; }
 
     /* 진행현황 표: 좁은 화면에서는 표 안에서만 가로 스크롤 */
     .progress-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -97,20 +97,13 @@ st.markdown("""
         h3 { font-size: 1.1rem !important; }
         .stDataFrame { font-size: 12px; }
 
-        /* 메뉴: 한 줄 가로 스와이프 + 알약 버튼 */
+        /* 메뉴: 한 줄 가로 스와이프 */
         .st-key-nav_radio div[role="radiogroup"] {
             flex-wrap: nowrap; overflow-x: auto; gap: 6px; padding-bottom: 8px;
             -webkit-overflow-scrolling: touch; scrollbar-width: none;
         }
         .st-key-nav_radio div[role="radiogroup"]::-webkit-scrollbar { display: none; }
-        .st-key-nav_radio div[role="radiogroup"] > label {
-            flex: 0 0 auto; white-space: nowrap; margin: 0;
-            padding: 8px 14px; border: 1px solid #dee2e6; border-radius: 999px; background: #f8f9fa;
-        }
-        .st-key-nav_radio div[role="radiogroup"] > label:has(input:checked) {
-            background: #339af0; border-color: #339af0;
-        }
-        .st-key-nav_radio div[role="radiogroup"] > label:has(input:checked) p { color: #fff !important; font-weight: 700; }
+        .st-key-nav_radio div[role="radiogroup"] > label { flex: 0 0 auto; white-space: nowrap; padding: 8px 14px; }
 
         /* 터치 영역 확대 */
         .stButton button, .stFormSubmitButton button { min-height: 46px; }
@@ -890,6 +883,16 @@ def find_col_loose(columns, keywords):
                 return c
     return None
 
+def calc_remaining_qty(row):
+    """통관하고 남은 잔여 수량 = 오픈수량 - 통관수량 합계 (장부의 '잔량'과 같은 계산)"""
+    cleared = 0.0
+    for c in parse_json_field(row.get('clearance_info')):
+        try: cleared += float(c.get('qty') or 0)
+        except (TypeError, ValueError): pass
+    try: base = float(row.get('quantity') or 0)
+    except (TypeError, ValueError): base = 0.0
+    return base - cleared
+
 def _esc(v, default='-'):
     return _html.escape(str(v)) if pd.notna(v) and str(v).strip() else default
 
@@ -928,6 +931,7 @@ def render_ledger_cards(df, page_key, on_select, page_size=20):
         price = f"${float(pv):,.2f}" if pd.notna(pv) and float(pv) > 0 else '-'
         fr = row.get('freight')
         freight_html = f"<div><div class='k'>운임 (참고 · {_esc(row.get('trade_terms'))})</div>${float(fr):,.2f}</div>" if pd.notna(fr) and float(fr) > 0 else ""
+        remain_s = f"{calc_remaining_qty(row):,.0f}"
         tri = " 🔺삼각" if pd.notna(row.get('tri_cnt')) and row.get('tri_cnt') > 0 else ""
         st.markdown(f"""
         <div class='m-card' style='margin-bottom:4px'>
@@ -936,6 +940,7 @@ def render_ledger_cards(df, page_key, on_select, page_size=20):
           <div class='m-kv'>
             <div><div class='k'>CK번호</div>{_esc(row.get('ck_code'))}</div><div><div class='k'>수출자</div>{_esc(row.get('supplier'))}</div>
             <div><div class='k'>ETA</div>{eta_s}</div><div><div class='k'>수량 / 단가</div>{qty} / {price}</div>
+            <div><div class='k'>통관잔량</div>{remain_s}</div>
             <div><div class='k'>Invoice</div>{_esc(row.get('invoice_no'))}</div><div><div class='k'>착지</div>{_esc(row.get('destination'))}</div>{freight_html}
           </div>
         </div>""", unsafe_allow_html=True)
@@ -1282,12 +1287,12 @@ st.title("🚢 수입/수출 통합 관리 시스템")
 
 # 탭 메뉴 정의
 MENU_OPTIONS = [
-    "📊 수입진행상황", 
-    "📒 수입장부 (상세)", 
-    "📤 수출 (Export)", 
-    "📐 삼각무역 (Triangular)",
-    "📝 수입 등록/관리", 
-    "📦 품목 관리"
+    "수입진행상황",
+    "수입장부 (상세)",
+    "수출",
+    "삼각무역",
+    "수입 등록/관리",
+    "품목 관리"
 ]
 
 # [핵심] 네비게이션 상태 분리 (active_tab: 논리적 탭 / nav_radio: 위젯 키)
@@ -1298,12 +1303,17 @@ if 'active_tab' not in st.session_state:
 def on_tab_change():
     st.session_state['active_tab'] = st.session_state['nav_radio']
 
-# 현재 상태에 맞는 인덱스 계산
-try:
-    current_idx = MENU_OPTIONS.index(st.session_state['active_tab'])
-except:
-    current_idx = 0
+# 다른 탭에서 프로그램으로 이동 요청이 온 경우(예: 장부에서 행 선택): 위젯 생성 전에 라디오 선택값까지 함께 바꾼다.
+# (라디오가 이전 탭에 눌린 채로 남으면 그 탭을 다시 눌러도 변경으로 인식되지 않아 돌아갈 수 없다)
+if 'nav_goto' in st.session_state:
+    _goto = st.session_state.pop('nav_goto')
+    if _goto in MENU_OPTIONS:
+        st.session_state['active_tab'] = _goto
+        st.session_state['nav_radio'] = _goto
+if st.session_state['active_tab'] not in MENU_OPTIONS:
     st.session_state['active_tab'] = MENU_OPTIONS[0]
+if st.session_state.get('nav_radio') not in MENU_OPTIONS:
+    st.session_state['nav_radio'] = st.session_state['active_tab']
 
 # [중요] 데이터프레임 선택 초기화용 키
 if 'df_key_tracker' not in st.session_state:
@@ -1313,7 +1323,6 @@ if 'df_key_tracker' not in st.session_state:
 selected_tab_val = st.radio(
     "메뉴 이동", 
     MENU_OPTIONS, 
-    index=current_idx,
     horizontal=True, 
     label_visibility="collapsed",
     key="nav_radio", 
@@ -1481,7 +1490,7 @@ elif selected_tab == MENU_OPTIONS[1]:
                 st.session_state['clearance_list'] = parse_json_field(r.get('clearance_info'))
                 st.session_state['declaration_list'] = parse_json_field(r.get('declaration_info'))
                 st.session_state['m_show_form'] = True
-                st.session_state['active_tab'] = MENU_OPTIONS[4]
+                st.session_state['nav_goto'] = MENU_OPTIONS[4]
                 st.rerun()
             render_ledger_cards(df_ledger, "ledger_m_shown", _open_from_ledger)
             st.stop()
@@ -1491,12 +1500,13 @@ elif selected_tab == MENU_OPTIONS[1]:
             ('ck_code', 'CK 관리번호', 'text'), ('global_code', '글로벌', 'text'), ('doojin_code', '두진', 'text'),
             ('agency', '대행', 'text'), ('agency_contract', '대행계약서', 'text'), ('supplier', '수출자(수입자)', 'text'),
             ('origin', '원산지', 'text'), ('product_name', '품명', 'text'), ('size', '사이즈', 'text'), ('packing', 'Packing', 'text'),
-            ('quantity', '오픈수량', '%.0f'), ('unit', '단위', 'text'), ('doc_qty', '서류수량', '%.0f'), ('box_qty', '박스수량', '%.0f'),
+            ('quantity', '오픈수량', '%.0f'), ('remain_qty', '통관잔량', '%.0f'), ('unit', '단위', 'text'), ('doc_qty', '서류수량', '%.0f'), ('box_qty', '박스수량', '%.0f'),
             ('unit_price', '단가(USD)', '%.2f'), ('unit2', '단가단위', 'text'), ('open_amount', '오픈금액', '%.2f'), ('doc_amount', '서류금액', '%.2f'),
             ('status_kr', '상태', 'text'), ('구분', '삼각', 'text'),
             ('etd', 'ETD', 'date'), ('expected_date', 'ETA', 'date'), ('arrival_date', '입고일', 'date'),
         ]
         df_ledger = df_ledger.assign(status_kr=df_ledger['status'].map({k: v[0] for k, v in STATUS_LABEL.items()}).fillna(df_ledger['status']))
+        df_ledger = df_ledger.assign(remain_qty=df_ledger.apply(calc_remaining_qty, axis=1))
         ledger_view = [v for v in LEDGER_VIEW if v[0] in df_ledger.columns]
         ledger_cfg = {c: (st.column_config.TextColumn(lbl) if fmt == 'text'
                           else st.column_config.DateColumn(lbl, format="YYYY-MM-DD") if fmt == 'date'
@@ -1525,7 +1535,7 @@ elif selected_tab == MENU_OPTIONS[1]:
             st.session_state['declaration_list'] = parse_json_field(selected_row.get('declaration_info'))
 
             # [핵심 수정] 상태 변수를 변경하고 리런하여 라디오 버튼 인덱스 재계산 유도
-            st.session_state['active_tab'] = MENU_OPTIONS[4] # "📝 수입 등록/관리"
+            st.session_state['nav_goto'] = MENU_OPTIONS[4]  # 수입 등록/관리 (메뉴 라디오 선택값도 함께 이동)
             st.session_state['df_key_tracker'] += 1
             st.rerun()
             
